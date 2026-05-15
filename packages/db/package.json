@@ -36,7 +36,7 @@
   ],
   "scripts": {
     "check:migrations": "tsx src/check-migration-numbering.ts",
-    "build": "pnpm run check:migrations && tsc && cp -r src/migrations dist/migrations",
+    "build": "pnpm run check:migrations && tsc && node -e \"const fs=require('fs'); const path=require('path'); const src=path.join('src','migrations'); const dst=path.join('dist','migrations'); if(fs.existsSync(src)) fs.cpSync(src, dst, {recursive: true, force: true});\"",
     "clean": "rm -rf dist",
     "typecheck": "pnpm run check:migrations && tsc --noEmit",
     "generate": "pnpm run check:migrations && tsc -p tsconfig.json && drizzle-kit generate",
