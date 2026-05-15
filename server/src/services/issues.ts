@@ -1877,11 +1877,11 @@ export function issueService(db: Db) {
     };
   }
 
-  async function readRunLogText(run: {
-    logStore: string | null;
-    logRef: string | null;
-    logBytes: number | null;
-  }) {
+async function readRunLogText(run: {
+  logStore: string | null;
+  logRef: string | null;
+  logBytes: number | null;
+}) {
     if (run.logStore !== "local_file" || !run.logRef) return "";
     const logBytes = Number(run.logBytes ?? 0);
     if (!Number.isFinite(logBytes) || logBytes <= 0) return "";
@@ -1891,20 +1891,26 @@ export function issueService(db: Db) {
     let content = "";
     let nextOffset: number | undefined = 0;
 
-    while (nextOffset !== undefined) {
-      const remainingBytes = ISSUE_COMMENT_RUN_LOG_DERIVATION_MAX_LOG_BYTES - Buffer.byteLength(content, "utf8");
-      if (remainingBytes <= 0) break;
-      const chunk = await store.read(
+  while (nextOffset !== undefined) {
+    const remainingBytes = ISSUE_COMMENT_RUN_LOG_DERIVATION_MAX_LOG_BYTES - Buffer.byteLength(content, "utf8");
+    if (remainingBytes <= 0) break;
+    let chunk;
+    try {
+      chunk = await store.read(
         { store: "local_file", logRef: run.logRef },
         {
           offset,
           limitBytes: Math.min(ISSUE_COMMENT_RUN_LOG_DERIVATION_CHUNK_BYTES, remainingBytes),
         },
       );
-      content += chunk.content;
-      nextOffset = chunk.nextOffset;
-      offset = chunk.nextOffset ?? 0;
+    } catch {
+      // Missing/expired run logs should not break issue comment reads.
+      break;
     }
+    content += chunk.content;
+    nextOffset = chunk.nextOffset;
+    offset = chunk.nextOffset ?? 0;
+  }
 
     return content;
   }

@@ -617,6 +617,125 @@ export function projectRoutes(db: Db) {
   router.post("/projects/:id/workspaces/:workspaceId/runtime-services/:action", validate(workspaceRuntimeControlTargetSchema), handleProjectWorkspaceRuntimeCommand);
   router.post("/projects/:id/workspaces/:workspaceId/runtime-commands/:action", validate(workspaceRuntimeControlTargetSchema), handleProjectWorkspaceRuntimeCommand);
 
+  // ── Requirement Analysis AI generation ──
+  router.post("/projects/:id/requirement-analysis/generate", async (req, res) => {
+    const id = req.params.id as string;
+    const project = await svc.getById(id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    assertCompanyAccess(req, project.companyId);
+
+    const body = req.body as { agentType?: unknown; requirements?: unknown };
+    if (
+      (body.agentType !== "requirement-breakdown" && body.agentType !== "sow") ||
+      typeof body.requirements !== "string"
+    ) {
+      res.status(400).json({ error: "agentType and requirements are required" });
+      return;
+    }
+    const agentType = body.agentType as "requirement-breakdown" | "sow";
+    const requirements = (body.requirements as string).trim();
+
+    const systemPrompts: Record<"requirement-breakdown" | "sow", string> = {
+      "requirement-breakdown": `You are an expert business analyst. Given project requirements, produce a structured requirement breakdown in Markdown. Include: Executive Summary, Functional Requirements (numbered list), Non-Functional Requirements, Constraints & Assumptions, Acceptance Criteria, and Open Questions. Be concise, clear, and professional.`,
+      sow: `You are an expert technical writer and project manager. Given project requirements, produce a professional Statement of Work (SOW) document in Markdown. Include: Executive Summary, Project Scope (in/out of scope), Deliverables (table with owner and due date), Timeline, Team & Responsibilities, Risks & Mitigations, Acceptance Criteria, and Payment/Approval Terms. Write in formal enterprise style.`,
+    };
+
+    const systemPrompt = systemPrompts[agentType];
+    const userMessage = requirements.length > 0
+      ? `Project: ${project.name}\n\nRequirements:\n${requirements}`
+      : `Project: ${project.name}\n\nGenerate a template-based document for this project.`;
+
+    const actor = getActorInfo(req);
+    const resolvedProjectEnv = await secretsSvc.resolveEnvBindings(
+      project.companyId,
+      project.env ?? {},
+      {
+        consumerType: "project",
+        consumerId: project.id,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        heartbeatRunId: actor.runId,
+      },
+    );
+
+    const anthropicKey = (resolvedProjectEnv.env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? "").trim();
+    const openaiKey = (resolvedProjectEnv.env.OPENAI_API_KEY ?? process.env.OPENAI_API_KEY ?? "").trim();
+
+    if (!anthropicKey && !openaiKey) {
+      res.status(422).json({
+        error: "No AI provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in project env or server environment.",
+      });
+      return;
+    }
+
+    let output: string;
+
+    if (anthropicKey) {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": anthropicKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-haiku-4-5",
+          max_tokens: 4096,
+          system: systemPrompt,
+          messages: [{ role: "user", content: userMessage }],
+        }),
+      });
+
+      if (!response.ok) {
+        const errBody = await response.text().catch(() => "");
+        res.status(502).json({ error: `Anthropic API error (${response.status})`, detail: errBody });
+        return;
+      }
+
+      const data = await response.json() as {
+        content?: Array<{ type: string; text: string }>;
+      };
+      output = data.content?.find((b) => b.type === "text")?.text ?? "";
+    } else {
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${openaiKey}`,
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          max_tokens: 4096,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: userMessage },
+          ],
+        }),
+      });
+
+      if (!response.ok) {
+        const errBody = await response.text().catch(() => "");
+        res.status(502).json({ error: `OpenAI API error (${response.status})`, detail: errBody });
+        return;
+      }
+
+      const data = await response.json() as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+      output = data.choices?.[0]?.message?.content ?? "";
+    }
+
+    if (!output) {
+      res.status(502).json({ error: "AI provider returned an empty response" });
+      return;
+    }
+
+    res.json({ output });
+  });
+
   router.delete("/projects/:id/workspaces/:workspaceId", async (req, res) => {
     const id = req.params.id as string;
     const workspaceId = req.params.workspaceId as string;

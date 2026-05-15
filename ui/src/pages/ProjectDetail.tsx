@@ -33,7 +33,7 @@ import { PluginSlotMount, PluginSlotOutlet, usePluginSlots } from "@/plugins/slo
 
 /* ── Top-level tab types ── */
 
-type ProjectBaseTab = "overview" | "list" | "plugin-operations" | "workspaces" | "configuration" | "budget";
+type ProjectBaseTab = "overview" | "list" | "plugin-operations" | "workspaces" | "configuration" | "requirement-analysis" | "budget";
 type ProjectPluginTab = `plugin:${string}`;
 type ProjectTab = ProjectBaseTab | ProjectPluginTab;
 
@@ -48,6 +48,7 @@ function resolveProjectTab(pathname: string, projectId: string): ProjectTab | nu
   const tab = segments[projectsIdx + 2];
   if (tab === "overview") return "overview";
   if (tab === "configuration") return "configuration";
+  if (tab === "requirement-analysis") return "requirement-analysis";
   if (tab === "budget") return "budget";
   if (tab === "issues") return "list";
   if (tab === "plugin-operations") return "plugin-operations";
@@ -270,6 +271,480 @@ function ProjectPluginOperationsList({
   );
 }
 
+/* ── Requirement Analysis Workspace ── */
+
+type AgentType = "requirement-breakdown" | "sow";
+
+interface UploadedFile {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+}
+
+function FileTypeIcon({ type }: { type: string }) {
+  if (type.includes("pdf"))
+    return (
+      <svg className="h-3.5 w-3.5 shrink-0 text-red-400" fill="currentColor" viewBox="0 0 24 24">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
+      </svg>
+    );
+  if (
+    type.includes("spreadsheet") ||
+    type.includes("excel") ||
+    type.includes("csv") ||
+    type.includes("xls")
+  )
+    return (
+      <svg className="h-3.5 w-3.5 shrink-0 text-emerald-400" fill="currentColor" viewBox="0 0 24 24">
+        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
+      </svg>
+    );
+  if (type.startsWith("image/"))
+    return (
+      <svg
+        className="h-3.5 w-3.5 shrink-0 text-blue-400"
+        fill="none"
+        viewBox="0 0 24 24"
+        stroke="currentColor"
+        strokeWidth={2}
+      >
+        <path
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+        />
+      </svg>
+    );
+  return (
+    <svg className="h-3.5 w-3.5 shrink-0 text-muted-foreground" fill="currentColor" viewBox="0 0 24 24">
+      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z" />
+    </svg>
+  );
+}
+
+function TrackerStatusChip({ status }: { status: string }) {
+  if (status === "done")
+    return (
+      <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-400">
+        Done
+      </span>
+    );
+  if (status === "pending")
+    return (
+      <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-400">
+        Pending
+      </span>
+    );
+  if (status === "clickup")
+    return (
+      <span className="rounded-full border border-violet-500/20 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-400">
+        ClickUp
+      </span>
+    );
+  return null;
+}
+
+const SOW_TRACKER_ITEMS = [
+  { label: "SOW Creator", status: "done" },
+  { label: "SOW Share with", status: "done" },
+  { label: "Shovan Review", status: "pending" },
+  { label: "Share with Client", status: "clickup" },
+] as const;
+
+function RequirementAnalysisWorkspace({
+  projectId,
+  companyId,
+}: {
+  projectId: string;
+  companyId: string | undefined;
+}) {
+  const [selectedAgent, setSelectedAgent] = useState<AgentType | null>(null);
+  const [requirements, setRequirements] = useState("");
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [output, setOutput] = useState<string | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleAgentSelect = (agent: AgentType) => {
+    setSelectedAgent(agent);
+    setOutput(null);
+    setGenerateError(null);
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    const newFiles: UploadedFile[] = files.map((f) => ({
+      id: `${f.name}-${Date.now()}-${Math.random()}`,
+      name: f.name,
+      size: f.size,
+      type: f.type,
+    }));
+    setUploadedFiles((prev) => [...prev, ...newFiles]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const removeFile = (id: string) => {
+    setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
+  };
+
+  const handleGenerate = async () => {
+    if (!selectedAgent) return;
+    setIsGenerating(true);
+    setGenerateError(null);
+    setOutput(null);
+    try {
+      const result = await projectsApi.generateRequirementAnalysis(
+        projectId,
+        { agentType: selectedAgent, requirements },
+        companyId,
+      );
+      setOutput(result.output);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Generation failed. Please try again.";
+      setGenerateError(msg);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const handleCopy = () => {
+    if (output) void navigator.clipboard.writeText(output);
+  };
+
+  const handleDownload = () => {
+    if (!output) return;
+    const blob = new Blob([output], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "Output.md";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const formatSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const canGenerate = !isGenerating && (requirements.trim().length > 0 || uploadedFiles.length > 0);
+
+  return (
+    <div className="max-w-4xl space-y-5">
+      {/* Agent selector card */}
+      <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+        <div>
+          <h3 className="text-sm font-semibold">Requirement Analysis</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Launch dedicated agents to break down requirements or draft a Statement of Work.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant={selectedAgent === "requirement-breakdown" ? "default" : "outline"}
+            onClick={() => handleAgentSelect("requirement-breakdown")}
+          >
+            Requirement Breakdown Agent
+          </Button>
+          <Button
+            variant={selectedAgent === "sow" ? "default" : "outline"}
+            onClick={() => handleAgentSelect("sow")}
+          >
+            SOW Agent
+          </Button>
+        </div>
+      </div>
+
+      {selectedAgent && (
+        <>
+          {/* AI Workspace */}
+          <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold">
+                {selectedAgent === "sow" ? "SOW Agent" : "Requirement Breakdown Agent"}
+                {" — Workspace"}
+              </h3>
+              <span className="shrink-0 rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
+                {selectedAgent === "sow" ? "Statement of Work" : "Breakdown"}
+              </span>
+            </div>
+
+            {/* Textarea */}
+            <textarea
+              className="w-full min-h-[180px] resize-y rounded-md border border-border bg-background px-3 py-2.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring focus:border-ring transition-colors"
+              placeholder="Describe your project requirements in detail. Include scope, goals, stakeholders, constraints, and any technical considerations…"
+              value={requirements}
+              onChange={(e) => setRequirements(e.target.value)}
+            />
+
+            {/* Upload row */}
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                id="req-asset-upload"
+                multiple
+                accept=".pdf,.docx,.doc,.xlsx,.xls,.csv,.png,.jpg,.jpeg,.gif,.webp"
+                className="sr-only"
+                onChange={handleFileChange}
+              />
+              <label
+                htmlFor="req-asset-upload"
+                className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-border bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <svg
+                  className="h-3.5 w-3.5"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
+                  />
+                </svg>
+                Upload Assets
+              </label>
+              <span className="text-xs text-muted-foreground">PDF, DOCX, Excel, images</span>
+            </div>
+
+            {/* File chips */}
+            {uploadedFiles.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {uploadedFiles.map((file) => (
+                  <div
+                    key={file.id}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted px-2.5 py-1 text-xs text-foreground"
+                  >
+                    <FileTypeIcon type={file.type} />
+                    <span className="max-w-[140px] truncate">{file.name}</span>
+                    <span className="text-muted-foreground">({formatSize(file.size)})</span>
+                    <button
+                      onClick={() => removeFile(file.id)}
+                      className="ml-0.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground"
+                      aria-label={`Remove ${file.name}`}
+                    >
+                      <svg
+                        className="h-3 w-3"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2.5}
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Generate */}
+            <div className="pt-1 space-y-2">
+              <Button onClick={handleGenerate} disabled={!canGenerate} className="gap-2">
+                {isGenerating ? (
+                  <>
+                    <svg className="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle
+                        className="opacity-25"
+                        cx="12"
+                        cy="12"
+                        r="10"
+                        stroke="currentColor"
+                        strokeWidth="4"
+                      />
+                      <path
+                        className="opacity-75"
+                        fill="currentColor"
+                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                      />
+                    </svg>
+                    Generating…
+                  </>
+                ) : (
+                  <>
+                    <svg
+                      className="h-3.5 w-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    Generate
+                  </>
+                )}
+              </Button>
+              {generateError && (
+                <p className="text-xs text-destructive">{generateError}</p>
+              )}
+            </div>
+          </div>
+
+          {/* Output section */}
+          {output !== null && (
+            <>
+              <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+                {/* Output header */}
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold">Output</h3>
+                  <div className="flex items-center gap-2">
+                    <span className="rounded border border-border bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground">
+                      Output.md
+                    </span>
+                    <button
+                      onClick={handleCopy}
+                      title="Copy to clipboard"
+                      className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      <svg
+                        className="h-3.5 w-3.5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                        />
+                      </svg>
+                      Copy
+                    </button>
+                    <button
+                      onClick={handleDownload}
+                      title="Download as .md"
+                      className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    >
+                      <svg
+                        className="h-3.5 w-3.5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"
+                        />
+                      </svg>
+                      Download
+                    </button>
+                  </div>
+                </div>
+
+                {/* Markdown preview */}
+                <div className="max-h-[480px] min-h-[220px] overflow-auto rounded-md border border-border bg-background p-4 font-mono text-xs leading-relaxed text-foreground whitespace-pre-wrap">
+                  {output}
+                </div>
+
+                {/* Save actions */}
+                <div className="flex flex-wrap gap-2 border-t border-border pt-4">
+                  <Button size="sm">Save</Button>
+                  <Button size="sm" variant="outline" className="gap-1.5">
+                    <svg
+                      className="h-3.5 w-3.5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={2}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 10-9.78 2.096A4.001 4.001 0 003 15z"
+                      />
+                    </svg>
+                    Save to SharePoint
+                  </Button>
+                  <Button size="sm" variant="outline">
+                    Save with Shovan
+                  </Button>
+                </div>
+              </div>
+
+              {/* SOW Tracker */}
+              <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-semibold">SOW Tracker</h3>
+                  <span className="rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
+                    {SOW_TRACKER_ITEMS.filter((i) => i.status === "done").length}/
+                    {SOW_TRACKER_ITEMS.length} complete
+                  </span>
+                </div>
+
+                <div className="space-y-0.5">
+                  {SOW_TRACKER_ITEMS.map((item, idx) => (
+                    <div key={item.label} className="flex items-stretch gap-3">
+                      {/* Timeline spine */}
+                      <div className="flex flex-col items-center">
+                        <div
+                          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold ${
+                            item.status === "done"
+                              ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-400"
+                              : item.status === "pending"
+                              ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                              : "border-violet-500/30 bg-violet-500/10 text-violet-400"
+                          }`}
+                        >
+                          {item.status === "done" ? (
+                            <svg
+                              className="h-3 w-3"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              stroke="currentColor"
+                              strokeWidth={2.5}
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                            </svg>
+                          ) : (
+                            <span>{idx + 1}</span>
+                          )}
+                        </div>
+                        {idx < SOW_TRACKER_ITEMS.length - 1 && (
+                          <div
+                            className={`my-0.5 w-px flex-1 ${
+                              item.status === "done" ? "bg-emerald-500/30" : "bg-border"
+                            }`}
+                          />
+                        )}
+                      </div>
+
+                      {/* Row content */}
+                      <div
+                        className={`flex flex-1 items-center justify-between gap-2 rounded-md px-2 py-2 transition-colors hover:bg-muted/60 ${
+                          idx < SOW_TRACKER_ITEMS.length - 1 ? "mb-0.5" : ""
+                        }`}
+                      >
+                        <span
+                          className={`text-sm ${
+                            item.status === "done" ? "text-foreground" : "text-muted-foreground"
+                          }`}
+                        >
+                          {item.label}
+                        </span>
+                        <TrackerStatusChip status={item.status} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ── Main project page ── */
 
 export function ProjectDetail() {
@@ -448,6 +923,10 @@ export function ProjectDetail() {
       navigate(`/projects/${canonicalProjectRef}/configuration`, { replace: true });
       return;
     }
+    if (activeTab === "requirement-analysis") {
+      navigate(`/projects/${canonicalProjectRef}/requirement-analysis`, { replace: true });
+      return;
+    }
     if (activeTab === "budget") {
       navigate(`/projects/${canonicalProjectRef}/budget`, { replace: true });
       return;
@@ -586,6 +1065,9 @@ export function ProjectDetail() {
     if (cachedTab === "configuration") {
       return <Navigate to={`/projects/${canonicalProjectRef}/configuration`} replace />;
     }
+    if (cachedTab === "requirement-analysis") {
+      return <Navigate to={`/projects/${canonicalProjectRef}/requirement-analysis`} replace />;
+    }
     if (cachedTab === "budget") {
       return <Navigate to={`/projects/${canonicalProjectRef}/budget`} replace />;
     }
@@ -621,6 +1103,8 @@ export function ProjectDetail() {
       navigate(`/projects/${canonicalProjectRef}/overview`);
     } else if (tab === "workspaces") {
       navigate(`/projects/${canonicalProjectRef}/workspaces`);
+    } else if (tab === "requirement-analysis") {
+      navigate(`/projects/${canonicalProjectRef}/requirement-analysis`);
     } else if (tab === "budget") {
       navigate(`/projects/${canonicalProjectRef}/budget`);
     } else if (tab === "plugin-operations") {
@@ -702,6 +1186,7 @@ export function ProjectDetail() {
             ...(project.managedByPlugin ? [{ value: "plugin-operations", label: "Plugin operations" }] : []),
             ...(showWorkspacesTab ? [{ value: "workspaces", label: "Workspaces" }] : []),
             { value: "configuration", label: "Configuration" },
+            { value: "requirement-analysis", label: "Requirement Analysis" },
             { value: "budget", label: "Budget" },
             ...pluginTabItems.map((item) => ({
               value: item.value,
@@ -766,6 +1251,13 @@ export function ProjectDetail() {
           />
         </div>
       )}
+
+      {activeTab === "requirement-analysis" ? (
+        <RequirementAnalysisWorkspace
+          projectId={project.id}
+          companyId={resolvedCompanyId ?? undefined}
+        />
+      ) : null}
 
       {activeTab === "budget" && resolvedCompanyId ? (
         <div className="max-w-3xl">

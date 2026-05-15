@@ -35,12 +35,30 @@ if (existsSync(PAPERCLIP_ENV_FILE_PATH)) {
   loadDotenv({ path: PAPERCLIP_ENV_FILE_PATH, override: false, quiet: true });
 }
 
-const CWD_ENV_PATH = resolve(process.cwd(), ".env");
-const isSameFile = existsSync(CWD_ENV_PATH) && existsSync(PAPERCLIP_ENV_FILE_PATH)
-  ? realpathSync(CWD_ENV_PATH) === realpathSync(PAPERCLIP_ENV_FILE_PATH)
-  : CWD_ENV_PATH === PAPERCLIP_ENV_FILE_PATH;
-if (!isSameFile && existsSync(CWD_ENV_PATH)) {
-  loadDotenv({ path: CWD_ENV_PATH, override: false, quiet: true });
+function findEnvFileFromAncestors(startDir: string): string | null {
+  let currentDir = resolve(startDir);
+  while (true) {
+    const candidate = resolve(currentDir, ".env");
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+
+    const nextDir = resolve(currentDir, "..");
+    if (nextDir === currentDir) break;
+    currentDir = nextDir;
+  }
+
+  return null;
+}
+
+const ANCESTOR_ENV_PATH = findEnvFileFromAncestors(process.cwd());
+if (ANCESTOR_ENV_PATH) {
+  const isSameFile = existsSync(PAPERCLIP_ENV_FILE_PATH)
+    ? realpathSync(ANCESTOR_ENV_PATH) === realpathSync(PAPERCLIP_ENV_FILE_PATH)
+    : ANCESTOR_ENV_PATH === PAPERCLIP_ENV_FILE_PATH;
+  if (!isSameFile) {
+    loadDotenv({ path: ANCESTOR_ENV_PATH, override: false, quiet: true });
+  }
 }
 
 maybeRepairLegacyWorktreeConfigAndEnvFiles();

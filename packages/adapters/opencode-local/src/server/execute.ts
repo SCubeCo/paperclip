@@ -53,6 +53,7 @@ import {
 import { removeMaintainerOnlySkillSymlinks } from "@paperclipai/adapter-utils/server-utils";
 import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+import { withOpenCodePathFallback } from "./command-env.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -301,8 +302,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const localRuntimeConfigHome =
     preparedRuntimeConfig.notes.length > 0 ? preparedRuntimeConfig.env.XDG_CONFIG_HOME : "";
   try {
+    const runtimeEnvWithFallback = await withOpenCodePathFallback(
+      command,
+      ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }),
+    );
     const runtimeEnv = Object.fromEntries(
-      Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
+      Object.entries(runtimeEnvWithFallback).filter(
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
@@ -444,9 +449,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
       if (paperclipBridge) {
         Object.assign(preparedRuntimeConfig.env, paperclipBridge.env);
+        const bridgeRuntimeEnvWithFallback = await withOpenCodePathFallback(
+          command,
+          ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }),
+        );
         loggedEnv = buildInvocationEnvForLogs(preparedRuntimeConfig.env, {
           runtimeEnv: Object.fromEntries(
-            Object.entries(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env })).filter(
+            Object.entries(bridgeRuntimeEnvWithFallback).filter(
               (entry): entry is [string, string] => typeof entry[1] === "string",
             ),
           ),

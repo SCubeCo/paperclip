@@ -1255,7 +1255,15 @@ async function resolveSpawnTarget(
     // Always use cmd.exe for .cmd/.bat wrappers. Some environments override
     // ComSpec to PowerShell, which breaks cmd-specific flags like /d /s /c.
     const shell = resolveWindowsCmdShell(env);
-    const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
+    // When the original command was PATH-resolved, invoke that bare command
+    // through cmd.exe. Passing a fully-resolved Program Files .cmd path here
+    // can be re-escaped by downstream wrappers and fail as "\"...\" is not
+    // recognized" on some Windows hosts.
+    const commandForShell =
+      command.includes("/") || command.includes("\\")
+        ? executable
+        : command;
+    const commandLine = [quoteForCmd(commandForShell), ...args.map(quoteForCmd)].join(" ");
     return {
       command: shell,
       args: ["/d", "/s", "/c", commandLine],

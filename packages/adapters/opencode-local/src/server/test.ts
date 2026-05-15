@@ -28,6 +28,7 @@ import { discoverOpenCodeModels, ensureOpenCodeModelConfiguredAndAvailable } fro
 import { parseOpenCodeJsonl } from "./parse.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import { prepareOpenCodeRuntimeConfig } from "./runtime-config.js";
+import { withOpenCodePathFallback } from "./command-env.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -171,7 +172,12 @@ export async function testEnvironment(
         preparedRuntimeConfig.env.XDG_CONFIG_HOME = preparedExecutionTargetRuntime.assetDirs.xdgConfig;
       }
     }
-    const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }));
+    const runtimeEnv = normalizeEnv(
+      await withOpenCodePathFallback(
+        command,
+        ensurePathInEnv({ ...process.env, ...preparedRuntimeConfig.env }),
+      ),
+    );
 
     const cwdInvalid = checks.some((check) => check.code === "opencode_cwd_invalid");
     if (cwdInvalid) {

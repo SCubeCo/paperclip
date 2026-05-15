@@ -146,6 +146,7 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     await db.delete(issueInboxArchives);
     await db.delete(activityLog);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
     await db.delete(executionWorkspaces);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
@@ -1157,6 +1158,74 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     });
 
     expect(comments.map((comment) => comment.id)).toEqual([firstCommentId]);
+  });
+
+  it("returns user-authored comments even when related run logs are unavailable", async () => {
+    const companyId = randomUUID();
+    const issueId = randomUUID();
+    const agentId = randomUUID();
+    const commentId = randomUUID();
+    const runId = randomUUID();
+    const commentCreatedAt = new Date("2026-03-26T11:00:00.000Z");
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "active",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Run-log tolerant comment reads",
+      status: "todo",
+      priority: "medium",
+    });
+
+    await db.insert(issueComments).values({
+      id: commentId,
+      companyId,
+      issueId,
+      authorType: "user",
+      authorUserId: "local-board",
+      body: "Board note",
+      createdAt: commentCreatedAt,
+      updatedAt: commentCreatedAt,
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      status: "failed",
+      invocationSource: "manual",
+      contextSnapshot: { issueId },
+      createdAt: new Date("2026-03-26T10:50:00.000Z"),
+      startedAt: new Date("2026-03-26T10:50:00.000Z"),
+      finishedAt: new Date("2026-03-26T11:05:00.000Z"),
+      logStore: "local_file",
+      logRef: `missing/${runId}.log`,
+      logBytes: 128,
+    });
+
+    const comments = await svc.listComments(issueId);
+
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.id).toBe(commentId);
+    expect(comments[0]?.authorType).toBe("user");
   });
 
   it("includes blockedBy summaries on list rows in one batched pass", async () => {
