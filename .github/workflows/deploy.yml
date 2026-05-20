@@ -64,6 +64,5 @@ jobs:
           az containerapp exec \
             --name paperclip-app \
             --resource-group paperclip-rg \
-            --command "sh -c 'COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm paperclipai auth bootstrap-ceo'" \
-            --yes
+            --command "sh -c 'COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm paperclipai auth bootstrap-ceo'"
  
