@@ -56,3 +56,5 @@ jobs:
             --resource-group paperclip-rg \
             --image $REGISTRY/$IMAGE_NAME:${{ github.sha }} \
             --set-env-vars NODE_ENV=production DATABASE_URL=secretref:database-url SERVE_UI=true PORT=3100 BETTER_AUTH_SECRET=secretref:better-auth-secret
+
+            
