@@ -19,8 +19,11 @@ import type { Db } from "@paperclipai/db";
 import {
   assets,
   agentApiKeys,
+  agents as dbAgents,
   authUsers,
   companies,
+  employeeAiAgentLinks,
+  employeeProfiles,
   companyLogos,
   companyMemberships,
   instanceUserRoles,
@@ -30,6 +33,7 @@ import {
 } from "@paperclipai/db";
 import {
   acceptInviteSchema,
+  createEmployeeSchema,
   createCliAuthChallengeSchema,
   claimJoinRequestApiKeySchema,
   createCompanyInviteSchema,
@@ -130,6 +134,114 @@ function requestBaseUrl(req: Request) {
     req.header("x-forwarded-host")?.split(",")[0]?.trim() || req.header("host");
   if (!host) return "";
   return `${proto}://${host}`;
+}
+
+type GraphMailConfig = {
+  tenantId: string;
+  clientId: string;
+  clientSecret: string;
+  senderUserId: string;
+};
+
+function readGraphMailConfig(): GraphMailConfig | null {
+  const tenantId = process.env.MS_GRAPH_TENANT_ID?.trim() ?? "";
+  const clientId = process.env.MS_GRAPH_CLIENT_ID?.trim() ?? "";
+  const clientSecret = process.env.MS_GRAPH_CLIENT_SECRET?.trim() ?? "";
+  const senderUserId = process.env.MS_GRAPH_SENDER_USER_ID?.trim() ?? "";
+  if (!tenantId || !clientId || !clientSecret || !senderUserId) {
+    return null;
+  }
+  return { tenantId, clientId, clientSecret, senderUserId };
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+async function getGraphAccessToken(config: GraphMailConfig): Promise<string> {
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: config.clientId,
+    client_secret: config.clientSecret,
+    scope: "https://graph.microsoft.com/.default",
+  });
+  const response = await fetch(`https://login.microsoftonline.com/${config.tenantId}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: body.toString(),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Graph token request failed (${response.status}): ${detail}`);
+  }
+  const tokenPayload = (await response.json()) as { access_token?: string };
+  if (!tokenPayload.access_token) {
+    throw new Error("Graph token request succeeded but no access token was returned");
+  }
+  return tokenPayload.access_token;
+}
+
+async function sendGraphMail(
+  config: GraphMailConfig,
+  options: {
+    to: string;
+    subject: string;
+    html: string;
+  },
+) {
+  const accessToken = await getGraphAccessToken(config);
+  const response = await fetch(
+    `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(config.senderUserId)}/sendMail`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify({
+        message: {
+          subject: options.subject,
+          body: {
+            contentType: "HTML",
+            content: options.html,
+          },
+          toRecipients: [{ emailAddress: { address: options.to } }],
+        },
+        saveToSentItems: false,
+      }),
+    },
+  );
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Graph sendMail failed (${response.status}): ${detail}`);
+  }
+}
+
+function buildEmployeeInviteEmailHtml(input: {
+  displayName: string;
+  inviteUrl: string;
+  inviterName: string;
+}): string {
+  const safeDisplayName = escapeHtml(input.displayName);
+  const safeInviterName = escapeHtml(input.inviterName);
+  const safeInviteUrl = escapeHtml(input.inviteUrl);
+  return [
+    "<div style=\"font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1f2937;line-height:1.5\">",
+    `<p>Hi ${safeDisplayName},</p>`,
+    `<p>${safeInviterName} invited you to join a Paperclip company workspace.</p>`,
+    `<p><a href=\"${safeInviteUrl}\" style=\"display:inline-block;padding:10px 16px;background:#111827;color:#ffffff;text-decoration:none;border-radius:8px\">Accept Invite</a></p>`,
+    `<p>If the button does not work, open this link directly:<br/><a href=\"${safeInviteUrl}\">${safeInviteUrl}</a></p>`,
+    "<p>This invite link is single-use and expires automatically.</p>",
+    "</div>",
+  ].join("");
 }
 
 function buildCliAuthApprovalPath(challengeId: string, token: string) {
@@ -256,6 +368,30 @@ type JoinDiagnostic = {
   level: "info" | "warn";
   message: string;
   hint?: string;
+};
+
+type EmployeeManagerMetadata = {
+  type: "agent" | "employee";
+  agentId?: string;
+  membershipId?: string;
+  displayName?: string | null;
+};
+
+type EmployeeInvitationMetadata = {
+  inviteId?: string | null;
+  invitePath?: string | null;
+  inviteUrl?: string | null;
+  onboardingTextUrl?: string | null;
+  emailStatus?: "sent" | "skipped" | "failed";
+  emailError?: string | null;
+  sentAt?: string | null;
+  acceptedAt?: string | null;
+};
+
+type EmployeeMetadata = {
+  manager?: EmployeeManagerMetadata;
+  invitation?: EmployeeInvitationMetadata;
+  personalAgentId?: string | null;
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1940,6 +2076,117 @@ function toUserProfile(
   };
 }
 
+function normalizeEmployeeMetadata(value: unknown): EmployeeMetadata {
+  if (!isPlainObject(value)) return {};
+
+  let manager: EmployeeManagerMetadata | undefined;
+  if (isPlainObject(value.manager)) {
+    const type =
+      value.manager.type === "agent" || value.manager.type === "employee"
+        ? value.manager.type
+        : null;
+    if (type) {
+      manager = {
+        type,
+        agentId: typeof value.manager.agentId === "string" ? value.manager.agentId : undefined,
+        membershipId:
+          typeof value.manager.membershipId === "string" ? value.manager.membershipId : undefined,
+        displayName:
+          typeof value.manager.displayName === "string" ? value.manager.displayName : null,
+      };
+    }
+  }
+
+  let invitation: EmployeeInvitationMetadata | undefined;
+  if (isPlainObject(value.invitation)) {
+    const emailStatus: EmployeeInvitationMetadata["emailStatus"] =
+      value.invitation.emailStatus === "sent" ||
+      value.invitation.emailStatus === "failed" ||
+      value.invitation.emailStatus === "skipped"
+        ? value.invitation.emailStatus
+        : "skipped";
+    invitation = {
+      inviteId: typeof value.invitation.inviteId === "string" ? value.invitation.inviteId : null,
+      invitePath: typeof value.invitation.invitePath === "string" ? value.invitation.invitePath : null,
+      inviteUrl: typeof value.invitation.inviteUrl === "string" ? value.invitation.inviteUrl : null,
+      onboardingTextUrl:
+        typeof value.invitation.onboardingTextUrl === "string"
+          ? value.invitation.onboardingTextUrl
+          : null,
+      emailStatus,
+      emailError:
+        typeof value.invitation.emailError === "string" ? value.invitation.emailError : null,
+      sentAt: typeof value.invitation.sentAt === "string" ? value.invitation.sentAt : null,
+      acceptedAt:
+        typeof value.invitation.acceptedAt === "string" ? value.invitation.acceptedAt : null,
+    };
+  }
+
+  return {
+    manager,
+    invitation,
+    personalAgentId: typeof value.personalAgentId === "string" ? value.personalAgentId : null,
+  };
+}
+
+function parseOptionalDate(value: string | null | undefined): Date | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeTextList(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  return values
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((value) => value.length > 0);
+}
+
+function employeeWorkforceStatusForMembership(
+  membershipStatus: string,
+  acceptedAt: Date | null,
+): "invited" | "pending_acceptance" | "active" | "suspended" {
+  if (membershipStatus === "active") return "active";
+  if (membershipStatus === "suspended" || membershipStatus === "archived") return "suspended";
+  return acceptedAt ? "pending_acceptance" : "invited";
+}
+
+function employeeAvailabilityForMembership(
+  membershipStatus: string,
+  acceptedAt: Date | null,
+): "invited" | "pending_acceptance" | "available" | "suspended" {
+  if (membershipStatus === "active") return "available";
+  if (membershipStatus === "suspended" || membershipStatus === "archived") return "suspended";
+  return acceptedAt ? "pending_acceptance" : "invited";
+}
+
+function buildEmployeeAssistantName(displayName: string) {
+  const firstName = displayName.trim().split(/\s+/)[0] ?? displayName.trim();
+  return `${firstName} Assistant`;
+}
+
+function buildEmployeeAssistantCapabilities(role: string, department: string | null | undefined) {
+  return [
+    `Personal AI copilot for the human employee in role ${role}.`,
+    department ? `Department: ${department}.` : null,
+    "Draft execution plans, status updates, and task work, but require human approval for final decisions.",
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ");
+}
+
+function extractEmployeeInviteDefaults(defaultsPayload: Record<string, unknown> | null | undefined) {
+  if (!isPlainObject(defaultsPayload?.human)) return null;
+  const human = defaultsPayload.human as Record<string, unknown>;
+  return {
+    employeeMembershipId:
+      typeof human.employeeMembershipId === "string" ? human.employeeMembershipId : null,
+    employeeProfileId: typeof human.employeeProfileId === "string" ? human.employeeProfileId : null,
+    personalAgentId: typeof human.personalAgentId === "string" ? human.personalAgentId : null,
+    invitedEmail: typeof human.invitedEmail === "string" ? human.invitedEmail : null,
+  };
+}
+
 async function resolveActorEmail(db: Db, req: Request): Promise<string | null> {
   if (isLocalImplicit(req)) return "local@paperclip.local";
   const userId = req.actor.userId;
@@ -1950,6 +2197,271 @@ async function resolveActorEmail(db: Db, req: Request): Promise<string | null> {
     .where(eq(authUsers.id, userId))
     .then((rows) => rows[0] ?? null);
   return user?.email ?? null;
+}
+
+async function resolveEmployeeManager(
+  db: Db,
+  agents: ReturnType<typeof agentService>,
+  companyId: string,
+  manager: { type: "agent"; agentId: string } | { type: "employee"; membershipId: string },
+) {
+  if (manager.type === "agent") {
+    const managerAgent = await agents.getById(manager.agentId);
+    if (!managerAgent || managerAgent.companyId !== companyId) {
+      throw badRequest("Manager agent not found");
+    }
+    return {
+      managerRef: {
+        type: "agent" as const,
+        agentId: managerAgent.id,
+        displayName: managerAgent.name,
+      },
+      reportsToAgentId: managerAgent.id,
+    };
+  }
+
+  const managerProfile = await db
+    .select({
+      displayName: employeeProfiles.displayName,
+      membershipId: employeeProfiles.membershipId,
+    })
+    .from(employeeProfiles)
+    .where(
+      and(
+        eq(employeeProfiles.companyId, companyId),
+        eq(employeeProfiles.membershipId, manager.membershipId),
+      ),
+    )
+    .then((rows) => rows[0] ?? null);
+  if (!managerProfile) throw badRequest("Manager employee not found");
+
+  const managerLink = await db
+    .select({ agentId: employeeAiAgentLinks.agentId })
+    .from(employeeAiAgentLinks)
+    .where(
+      and(
+        eq(employeeAiAgentLinks.companyId, companyId),
+        eq(employeeAiAgentLinks.membershipId, manager.membershipId),
+        eq(employeeAiAgentLinks.isPrimary, true),
+      ),
+    )
+    .then((rows) => rows[0] ?? null);
+  if (!managerLink) {
+    throw conflict("Manager employee does not have a linked personal AI agent");
+  }
+
+  return {
+    managerRef: {
+      type: "employee" as const,
+      membershipId: managerProfile.membershipId,
+      displayName: managerProfile.displayName,
+    },
+    reportsToAgentId: managerLink.agentId,
+  };
+}
+
+async function loadEmployeeRecords(db: Db, companyId: string) {
+  const rows = await db
+    .select({
+      profile: employeeProfiles,
+      membership: companyMemberships,
+      user: {
+        id: authUsers.id,
+        email: authUsers.email,
+        name: authUsers.name,
+        image: authUsers.image,
+      },
+    })
+    .from(employeeProfiles)
+    .innerJoin(companyMemberships, eq(companyMemberships.id, employeeProfiles.membershipId))
+    .leftJoin(authUsers, eq(authUsers.id, companyMemberships.principalId))
+    .where(
+      and(
+        eq(employeeProfiles.companyId, companyId),
+        ne(companyMemberships.status, "archived"),
+      ),
+    )
+    .orderBy(desc(employeeProfiles.updatedAt));
+
+  const membershipIds = [...new Set(rows.map((row) => row.profile.membershipId))];
+  const linkedAgents = membershipIds.length
+    ? await db
+        .select({
+          membershipId: employeeAiAgentLinks.membershipId,
+          id: dbAgents.id,
+          name: dbAgents.name,
+          role: dbAgents.role,
+          status: dbAgents.status,
+          reportsTo: dbAgents.reportsTo,
+        })
+        .from(employeeAiAgentLinks)
+        .innerJoin(dbAgents, eq(dbAgents.id, employeeAiAgentLinks.agentId))
+        .where(
+          and(
+            eq(employeeAiAgentLinks.companyId, companyId),
+            eq(employeeAiAgentLinks.isPrimary, true),
+            inArray(employeeAiAgentLinks.membershipId, membershipIds),
+          ),
+        )
+    : [];
+
+  const agentByMembershipId = new Map(linkedAgents.map((row) => [row.membershipId, row]));
+
+  return rows.map((row) => {
+    const metadata = normalizeEmployeeMetadata(row.profile.metadata);
+    const acceptedAt = parseOptionalDate(metadata.invitation?.acceptedAt ?? null);
+    const linkedAgent = agentByMembershipId.get(row.profile.membershipId) ?? null;
+    const userProfile = row.user?.id ? toUserProfile(row.user) : null;
+
+    return {
+      id: row.profile.id,
+      companyId: row.profile.companyId,
+      membershipId: row.profile.membershipId,
+      membershipStatus: row.membership.status,
+      workforceStatus: employeeWorkforceStatusForMembership(row.membership.status, acceptedAt),
+      workspaceRole: row.membership.membershipRole
+        ? normalizeHumanRole(row.membership.membershipRole, "operator")
+        : null,
+      displayName: row.profile.displayName,
+      email: row.profile.email ?? userProfile?.email ?? row.membership.principalId,
+      role: row.profile.role,
+      department: row.profile.department,
+      experienceLevel:
+        row.profile.experienceLevel === "junior" ||
+        row.profile.experienceLevel === "senior" ||
+        row.profile.experienceLevel === "lead"
+          ? row.profile.experienceLevel
+          : "mid",
+      availabilityStatus:
+        row.profile.availabilityStatus === "busy" || row.profile.availabilityStatus === "away"
+          ? row.profile.availabilityStatus
+          : employeeAvailabilityForMembership(row.membership.status, acceptedAt),
+      skills: normalizeTextList(row.profile.skills),
+      assignedProjects: normalizeTextList(row.profile.assignedProjects),
+      manager: metadata.manager?.type
+        ? {
+            type: metadata.manager.type,
+            membershipId: metadata.manager.membershipId,
+            agentId: metadata.manager.agentId,
+            displayName: metadata.manager.displayName ?? null,
+          }
+        : null,
+      invitation: metadata.invitation
+        ? {
+            inviteId: metadata.invitation.inviteId ?? null,
+            invitePath: metadata.invitation.invitePath ?? null,
+            inviteUrl: metadata.invitation.inviteUrl ?? null,
+            onboardingTextUrl: metadata.invitation.onboardingTextUrl ?? null,
+            emailStatus: metadata.invitation.emailStatus ?? "skipped",
+            emailError: metadata.invitation.emailError ?? null,
+            sentAt: parseOptionalDate(metadata.invitation.sentAt ?? null),
+            acceptedAt,
+          }
+        : null,
+      personalAgent: linkedAgent
+        ? {
+            id: linkedAgent.id,
+            name: linkedAgent.name,
+            role: linkedAgent.role,
+            status: linkedAgent.status,
+            reportsTo: linkedAgent.reportsTo,
+          }
+        : null,
+      memberUser: userProfile,
+      createdAt: row.profile.createdAt,
+      updatedAt: row.profile.updatedAt,
+    };
+  });
+}
+
+async function syncEmployeeMembershipState(
+  db: Db,
+  access: ReturnType<typeof accessService>,
+  agents: ReturnType<typeof agentService>,
+  companyId: string,
+  membershipId: string,
+  grantedByUserId: string | null,
+) {
+  const membership = await db
+    .select()
+    .from(companyMemberships)
+    .where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.id, membershipId)))
+    .then((rows) => rows[0] ?? null);
+  if (!membership) return;
+
+  const profile = await db
+    .select()
+    .from(employeeProfiles)
+    .where(and(eq(employeeProfiles.companyId, companyId), eq(employeeProfiles.membershipId, membershipId)))
+    .then((rows) => rows[0] ?? null);
+  if (!profile) return;
+
+  const metadata = normalizeEmployeeMetadata(profile.metadata);
+  const acceptedAt = parseOptionalDate(metadata.invitation?.acceptedAt ?? null);
+  const nextAvailability = employeeAvailabilityForMembership(membership.status, acceptedAt);
+  const currentAvailability = profile.availabilityStatus;
+  const shouldUpdateAvailability =
+    nextAvailability === "available"
+      ? currentAvailability === "invited" ||
+        currentAvailability === "pending_acceptance" ||
+        currentAvailability === "suspended"
+      : currentAvailability !== nextAvailability;
+
+  if (shouldUpdateAvailability) {
+    await db
+      .update(employeeProfiles)
+      .set({ availabilityStatus: nextAvailability, updatedAt: new Date() })
+      .where(eq(employeeProfiles.id, profile.id));
+  }
+
+  const links = await db
+    .select({ agentId: employeeAiAgentLinks.agentId })
+    .from(employeeAiAgentLinks)
+    .where(
+      and(
+        eq(employeeAiAgentLinks.companyId, companyId),
+        eq(employeeAiAgentLinks.membershipId, membershipId),
+      ),
+    );
+  if (links.length === 0) return;
+
+  const grants =
+    membership.status === "active"
+      ? await db
+          .select({
+            permissionKey: principalPermissionGrants.permissionKey,
+            scope: principalPermissionGrants.scope,
+          })
+          .from(principalPermissionGrants)
+          .where(
+            and(
+              eq(principalPermissionGrants.companyId, companyId),
+              eq(principalPermissionGrants.principalType, membership.principalType),
+              eq(principalPermissionGrants.principalId, membership.principalId),
+            ),
+          )
+          .then((rows) =>
+            rows.map((row) => ({
+              permissionKey: row.permissionKey as PermissionKey,
+              scope: row.scope,
+            })),
+          )
+      : [];
+
+  for (const link of links) {
+    await access.setPrincipalGrants(companyId, "agent", link.agentId, grants, grantedByUserId);
+    const linkedAgent = await agents.getById(link.agentId);
+    if (!linkedAgent) continue;
+    if (membership.status === "active") {
+      if (linkedAgent.status === "paused" && linkedAgent.pauseReason === "system") {
+        await agents.resume(link.agentId);
+      }
+      continue;
+    }
+    if (linkedAgent.status !== "terminated" && linkedAgent.status !== "paused") {
+      await agents.pause(link.agentId, "system");
+    }
+  }
 }
 
 async function resolveAcceptedInviteJoinRequest(
@@ -2624,6 +3136,7 @@ export function accessRoutes(
       userId: req.actor.userId,
       isInstanceAdmin: accessSnapshot.isInstanceAdmin,
       companyIds: accessSnapshot.companyIds,
+      canCreateCompany: accessSnapshot.isInstanceAdmin || accessSnapshot.companyIds.length === 0,
       memberships: accessSnapshot.memberships,
       source: req.actor.source ?? "none",
       keyId: req.actor.source === "board_key" ? req.actor.keyId ?? null : null,
@@ -3384,6 +3897,20 @@ export function accessRoutes(
 
       const actorEmail =
         requestType === "human" ? await resolveActorEmail(db, req) : null;
+      const employeeInviteDefaults =
+        requestType === "human"
+          ? extractEmployeeInviteDefaults(
+              invite.defaultsPayload as Record<string, unknown> | null,
+            )
+          : null;
+      if (
+        requestType === "human" &&
+        actorEmail &&
+        employeeInviteDefaults?.invitedEmail &&
+        actorEmail.trim().toLowerCase() !== employeeInviteDefaults.invitedEmail.trim().toLowerCase()
+      ) {
+        throw conflict("This invite is for a different email address");
+      }
       const existingHumanJoinRequest =
         requestType === "human"
           ? findReusableHumanJoinRequest(
@@ -3403,7 +3930,7 @@ export function accessRoutes(
               }
             )
           : null;
-      const created = !inviteAlreadyAccepted
+      let created = !inviteAlreadyAccepted
         ? existingHumanJoinRequest
           ? await db.transaction(async (tx) => {
               await tx
@@ -3416,6 +3943,50 @@ export function accessRoutes(
                     isNull(invites.revokedAt)
                   )
                 );
+              if (requestType === "human" && employeeInviteDefaults?.employeeMembershipId) {
+                const employeeProfile = await tx
+                  .select({
+                    id: employeeProfiles.id,
+                    metadata: employeeProfiles.metadata,
+                  })
+                  .from(employeeProfiles)
+                  .where(
+                    and(
+                      eq(employeeProfiles.companyId, companyId),
+                      eq(employeeProfiles.membershipId, employeeInviteDefaults.employeeMembershipId),
+                    ),
+                  )
+                  .then((rows) => rows[0] ?? null);
+                if (employeeProfile) {
+                  const metadata = normalizeEmployeeMetadata(employeeProfile.metadata);
+                  await tx
+                    .update(companyMemberships)
+                    .set({
+                      principalId: req.actor.userId ?? "local-board",
+                      updatedAt: new Date(),
+                    })
+                    .where(
+                      and(
+                        eq(companyMemberships.companyId, companyId),
+                        eq(companyMemberships.id, employeeInviteDefaults.employeeMembershipId),
+                      ),
+                    );
+                  await tx
+                    .update(employeeProfiles)
+                    .set({
+                      availabilityStatus: "pending_acceptance",
+                      metadata: {
+                        ...metadata,
+                        invitation: {
+                          ...(metadata.invitation ?? {}),
+                          acceptedAt: new Date().toISOString(),
+                        },
+                      },
+                      updatedAt: new Date(),
+                    })
+                    .where(eq(employeeProfiles.id, employeeProfile.id));
+                }
+              }
               return existingHumanJoinRequest;
             })
           : await db.transaction(async (tx) => {
@@ -3458,6 +4029,50 @@ export function accessRoutes(
                 })
                 .returning()
                 .then((rows) => rows[0]);
+              if (requestType === "human" && employeeInviteDefaults?.employeeMembershipId) {
+                const employeeProfile = await tx
+                  .select({
+                    id: employeeProfiles.id,
+                    metadata: employeeProfiles.metadata,
+                  })
+                  .from(employeeProfiles)
+                  .where(
+                    and(
+                      eq(employeeProfiles.companyId, companyId),
+                      eq(employeeProfiles.membershipId, employeeInviteDefaults.employeeMembershipId),
+                    ),
+                  )
+                  .then((rows) => rows[0] ?? null);
+                if (employeeProfile) {
+                  const metadata = normalizeEmployeeMetadata(employeeProfile.metadata);
+                  await tx
+                    .update(companyMemberships)
+                    .set({
+                      principalId: req.actor.userId ?? "local-board",
+                      updatedAt: new Date(),
+                    })
+                    .where(
+                      and(
+                        eq(companyMemberships.companyId, companyId),
+                        eq(companyMemberships.id, employeeInviteDefaults.employeeMembershipId),
+                      ),
+                    );
+                  await tx
+                    .update(employeeProfiles)
+                    .set({
+                      availabilityStatus: "pending_acceptance",
+                      metadata: {
+                        ...metadata,
+                        invitation: {
+                          ...(metadata.invitation ?? {}),
+                          acceptedAt: new Date().toISOString(),
+                        },
+                      },
+                      updatedAt: new Date(),
+                    })
+                    .where(eq(employeeProfiles.id, employeeProfile.id));
+                }
+              }
               return row;
             })
         : await db
@@ -3484,6 +4099,70 @@ export function accessRoutes(
             .where(eq(joinRequests.id, replayJoinRequestId as string))
             .returning()
             .then((rows) => rows[0]);
+
+      if (
+        requestType === "human" &&
+        employeeInviteDefaults?.employeeMembershipId &&
+        created?.status === "pending_approval"
+      ) {
+        if (!created.requestingUserId) {
+          throw conflict("Join request missing user identity");
+        }
+
+        const membershipRole = resolveHumanInviteRole(
+          invite.defaultsPayload as Record<string, unknown> | null,
+        );
+        const employeeMembershipId = employeeInviteDefaults.employeeMembershipId;
+
+        await db
+          .update(companyMemberships)
+          .set({
+            principalType: "user",
+            principalId: created.requestingUserId,
+            membershipRole,
+            status: "active",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(companyMemberships.companyId, companyId),
+              eq(companyMemberships.id, employeeMembershipId),
+            ),
+          );
+
+        const grants = humanJoinGrantsFromDefaults(
+          invite.defaultsPayload as Record<string, unknown> | null,
+          membershipRole,
+        );
+        await access.setPrincipalGrants(
+          companyId,
+          "user",
+          created.requestingUserId,
+          grants,
+          req.actor.userId ?? null,
+        );
+        await syncEmployeeMembershipState(
+          db,
+          access,
+          agents,
+          companyId,
+          employeeMembershipId,
+          req.actor.userId ?? null,
+        );
+
+        const approved = await db
+          .update(joinRequests)
+          .set({
+            status: "approved",
+            approvedAt: new Date(),
+            approvedByUserId: req.actor.userId ?? null,
+            updatedAt: new Date(),
+          })
+          .where(eq(joinRequests.id, created.id))
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (approved) created = approved;
+      }
 
       if (!created) {
         throw conflict("Join request not found");
@@ -3705,6 +4384,293 @@ export function accessRoutes(
     res.json(filtered);
   });
 
+  router.get("/companies/:companyId/employees", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    const [employees, currentAccess] = await Promise.all([
+      loadEmployeeRecords(db, companyId),
+      loadCompanyAccessSummary(req, access, companyId),
+    ]);
+    res.json({
+      employees,
+      access: {
+        canCreateEmployees: currentAccess.canInviteUsers,
+        canInviteUsers: currentAccess.canInviteUsers,
+        canManageMembers: currentAccess.canManageMembers,
+      },
+    });
+  });
+
+  router.post(
+    "/companies/:companyId/employees",
+    validate(createEmployeeSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      await assertCompanyPermission(req, companyId, "users:invite");
+
+      const normalizedEmail = req.body.email.trim().toLowerCase();
+      const graphMailConfig = readGraphMailConfig();
+      const existingPlaceholderMembership = await db
+        .select({ id: companyMemberships.id })
+        .from(companyMemberships)
+        .where(
+          and(
+            eq(companyMemberships.companyId, companyId),
+            eq(companyMemberships.principalType, "user"),
+            eq(companyMemberships.principalId, normalizedEmail),
+          ),
+        )
+        .then((rows) => rows[0] ?? null);
+      const existingEmployee = await db
+        .select({ id: employeeProfiles.id })
+        .from(employeeProfiles)
+        .innerJoin(companyMemberships, eq(companyMemberships.id, employeeProfiles.membershipId))
+        .where(
+          and(
+            eq(employeeProfiles.companyId, companyId),
+            eq(employeeProfiles.email, normalizedEmail),
+            ne(companyMemberships.status, "archived"),
+          ),
+        )
+        .then((rows) => rows[0] ?? null);
+      if (existingEmployee) throw conflict("An employee with that email already exists");
+
+      const manager = await resolveEmployeeManager(db, agents, companyId, req.body.manager);
+      const personalAgent = await agents.create(companyId, {
+        name: buildEmployeeAssistantName(req.body.displayName),
+        role: "general",
+        title: `${req.body.role} AI Assistant`,
+        icon: null,
+        status: "paused",
+        reportsTo: manager.reportsToAgentId,
+        capabilities: buildEmployeeAssistantCapabilities(req.body.role, req.body.department),
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+        defaultEnvironmentId: null,
+        budgetMonthlyCents: 0,
+        spentMonthlyCents: 0,
+        pauseReason: "system",
+        pausedAt: new Date(),
+        permissions: {},
+        lastHeartbeatAt: null,
+        metadata: {
+          employeeAssistant: true,
+          approvalRequired: true,
+          source: "employee_profile",
+        },
+      });
+
+      try {
+        await access.ensureMembership(companyId, "agent", personalAgent.id, "member", "active");
+
+        const now = new Date();
+        const created = await db.transaction(async (tx) => {
+          const membership = existingPlaceholderMembership
+            ? await tx
+                .update(companyMemberships)
+                .set({
+                  status: "pending",
+                  membershipRole: req.body.workspaceRole,
+                  updatedAt: now,
+                })
+                .where(eq(companyMemberships.id, existingPlaceholderMembership.id))
+                .returning()
+                .then((rows) => rows[0])
+            : await tx
+                .insert(companyMemberships)
+                .values({
+                  companyId,
+                  principalType: "user",
+                  principalId: normalizedEmail,
+                  status: "pending",
+                  membershipRole: req.body.workspaceRole,
+                  createdAt: now,
+                  updatedAt: now,
+                })
+                .returning()
+                .then((rows) => rows[0]);
+
+          const existingProfile = await tx
+            .select({ id: employeeProfiles.id })
+            .from(employeeProfiles)
+            .where(
+              and(
+                eq(employeeProfiles.companyId, companyId),
+                eq(employeeProfiles.membershipId, membership.id),
+              ),
+            )
+            .then((rows) => rows[0] ?? null);
+
+          const profile = existingProfile
+            ? await tx
+                .update(employeeProfiles)
+                .set({
+                  displayName: req.body.displayName,
+                  email: normalizedEmail,
+                  role: req.body.role,
+                  experienceLevel: req.body.experienceLevel,
+                  department: req.body.department ?? null,
+                  availabilityStatus: "invited",
+                  skills: req.body.skills ?? [],
+                  assignedProjects: req.body.assignedProjects ?? [],
+                  metadata: {
+                    manager: manager.managerRef,
+                    personalAgentId: personalAgent.id,
+                  },
+                  updatedAt: now,
+                })
+                .where(eq(employeeProfiles.id, existingProfile.id))
+                .returning()
+                .then((rows) => rows[0])
+            : await tx
+                .insert(employeeProfiles)
+                .values({
+                  companyId,
+                  membershipId: membership.id,
+                  displayName: req.body.displayName,
+                  email: normalizedEmail,
+                  role: req.body.role,
+                  experienceLevel: req.body.experienceLevel,
+                  department: req.body.department ?? null,
+                  availabilityStatus: "invited",
+                  skills: req.body.skills ?? [],
+                  assignedProjects: req.body.assignedProjects ?? [],
+                  metadata: {
+                    manager: manager.managerRef,
+                    personalAgentId: personalAgent.id,
+                  },
+                  createdAt: now,
+                  updatedAt: now,
+                })
+                .returning()
+                .then((rows) => rows[0]);
+
+          await tx.insert(employeeAiAgentLinks).values({
+            companyId,
+            membershipId: membership.id,
+            agentId: personalAgent.id,
+            relationType: "assistant",
+            isPrimary: true,
+            createdAt: now,
+            updatedAt: now,
+          });
+
+          const inviteResult = await createCompanyInviteForCompany({
+            req,
+            companyId,
+            allowedJoinTypes: "human",
+            humanRole: req.body.workspaceRole,
+            defaultsPayload: {
+              human: {
+                employeeMembershipId: membership.id,
+                employeeProfileId: profile.id,
+                personalAgentId: personalAgent.id,
+                invitedEmail: normalizedEmail,
+                displayName: req.body.displayName,
+                manager: manager.managerRef,
+              },
+            },
+          });
+
+          const inviteSummary = toInviteSummaryResponse(req, inviteResult.token, inviteResult.created, null);
+          return {
+            membershipId: membership.id,
+            profileId: profile.id,
+            inviteId: inviteResult.created.id,
+            invitePath: inviteSummary.invitePath,
+            inviteUrl: inviteSummary.inviteUrl,
+            onboardingTextUrl: inviteSummary.onboardingTextUrl,
+          };
+        });
+
+        let emailStatus: "sent" | "failed" | "skipped" = "skipped";
+        let emailError: string | null = null;
+        let sentAt: string | null = null;
+
+        if (!graphMailConfig) {
+          emailStatus = "failed";
+          emailError =
+            "Microsoft Graph email is not configured. Set MS_GRAPH_TENANT_ID, MS_GRAPH_CLIENT_ID, MS_GRAPH_CLIENT_SECRET, and MS_GRAPH_SENDER_USER_ID.";
+        } else {
+          try {
+            const inviterName = req.actor.userName?.trim() || req.actor.userEmail?.trim() || "A company admin";
+            await sendGraphMail(graphMailConfig, {
+              to: normalizedEmail,
+              subject: "Paperclip company invite",
+              html: buildEmployeeInviteEmailHtml({
+                displayName: req.body.displayName,
+                inviteUrl: created.inviteUrl,
+                inviterName,
+              }),
+            });
+            emailStatus = "sent";
+            sentAt = new Date().toISOString();
+          } catch (error) {
+            emailStatus = "failed";
+            emailError = error instanceof Error ? error.message : "Unknown email delivery error";
+            logger.warn(
+              {
+                companyId,
+                profileId: created.profileId,
+                email: normalizedEmail,
+                error: emailError,
+              },
+              "employee invite email delivery failed",
+            );
+          }
+        }
+
+        await db
+          .update(employeeProfiles)
+          .set({
+            metadata: {
+              manager: manager.managerRef,
+              personalAgentId: personalAgent.id,
+              invitation: {
+                inviteId: created.inviteId,
+                invitePath: created.invitePath,
+                inviteUrl: created.inviteUrl,
+                onboardingTextUrl: created.onboardingTextUrl,
+                emailStatus,
+                emailError,
+                sentAt,
+                acceptedAt: null,
+              },
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(employeeProfiles.id, created.profileId));
+
+        await logActivity(db, {
+          companyId,
+          actorType: req.actor.type === "agent" ? "agent" : "user",
+          actorId:
+            req.actor.type === "agent"
+              ? req.actor.agentId ?? "unknown-agent"
+              : req.actor.userId ?? "board",
+          action: "employee.created",
+          entityType: "employee_profile",
+          entityId: created.profileId,
+          details: {
+            membershipId: created.membershipId,
+            personalAgentId: personalAgent.id,
+            email: normalizedEmail,
+          },
+        });
+
+        const employee = (await loadEmployeeRecords(db, companyId)).find(
+          (entry) => entry.id === created.profileId,
+        );
+        if (!employee) throw notFound("Employee not found");
+        res.status(201).json({ employee });
+      } catch (error) {
+        await agents.remove(personalAgent.id);
+        throw error;
+      }
+    },
+  );
+
   router.post(
     "/companies/:companyId/join-requests/:requestId/approve",
     async (req, res) => {
@@ -3740,13 +4706,35 @@ export function accessRoutes(
         const membershipRole = resolveHumanInviteRole(
           invite.defaultsPayload as Record<string, unknown> | null,
         );
-        await access.ensureMembership(
-          companyId,
-          "user",
-          existing.requestingUserId,
-          membershipRole,
-          "active"
+        const employeeInviteDefaults = extractEmployeeInviteDefaults(
+          invite.defaultsPayload as Record<string, unknown> | null,
         );
+        const employeeMembershipId = employeeInviteDefaults?.employeeMembershipId ?? null;
+        if (employeeMembershipId) {
+          await db
+            .update(companyMemberships)
+            .set({
+              principalType: "user",
+              principalId: existing.requestingUserId,
+              membershipRole,
+              status: "active",
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(companyMemberships.companyId, companyId),
+                eq(companyMemberships.id, employeeMembershipId),
+              ),
+            );
+        } else {
+          await access.ensureMembership(
+            companyId,
+            "user",
+            existing.requestingUserId,
+            membershipRole,
+            "active"
+          );
+        }
         const grants = humanJoinGrantsFromDefaults(
           invite.defaultsPayload as Record<string, unknown> | null,
           membershipRole
@@ -3758,6 +4746,16 @@ export function accessRoutes(
           grants,
           req.actor.userId ?? null
         );
+        if (employeeMembershipId) {
+          await syncEmployeeMembershipState(
+            db,
+            access,
+            agents,
+            companyId,
+            employeeMembershipId,
+            req.actor.userId ?? null,
+          );
+        }
       } else {
         const existingAgents = await agents.list(companyId);
         const managerId = resolveJoinRequestAgentManagerId(existingAgents);
@@ -4091,6 +5089,14 @@ export function accessRoutes(
           status: updated.status,
         },
       });
+      await syncEmployeeMembershipState(
+        db,
+        access,
+        agents,
+        companyId,
+        memberId,
+        req.actor.userId ?? null,
+      );
 
       const member = (await loadCompanyMemberRecords(db, companyId)).find(
         (entry) => entry.id === memberId,
@@ -4218,6 +5224,14 @@ export function accessRoutes(
           grantCount: req.body.grants?.length ?? 0,
         },
       });
+      await syncEmployeeMembershipState(
+        db,
+        access,
+        agents,
+        companyId,
+        memberId,
+        req.actor.userId ?? null,
+      );
 
       const member = (await loadCompanyMemberRecords(db, companyId)).find(
         (entry) => entry.id === memberId,
@@ -4256,6 +5270,14 @@ export function accessRoutes(
           reassignment: req.body.reassignment ?? null,
         },
       });
+      await syncEmployeeMembershipState(
+        db,
+        access,
+        agents,
+        companyId,
+        memberId,
+        req.actor.userId ?? null,
+      );
 
       const member = (await loadCompanyMemberRecords(db, companyId, { includeArchived: true })).find(
         (entry) => entry.id === memberId,
@@ -4296,6 +5318,14 @@ export function accessRoutes(
           grantCount: req.body.grants?.length ?? 0,
         },
       });
+      await syncEmployeeMembershipState(
+        db,
+        access,
+        agents,
+        companyId,
+        memberId,
+        req.actor.userId ?? null,
+      );
       const member = (await loadCompanyMemberRecords(db, companyId)).find(
         (entry) => entry.id === memberId,
       );

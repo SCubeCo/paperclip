@@ -83,10 +83,10 @@ export function CompanyProvider({ children }: { children: ReactNode }) {
     },
     retry: false,
   });
-  const companies = companiesResult.companies;
+  const companies = companiesResult.companies || [];
   const companyListUnauthorized = companiesResult.unauthorized;
   const sidebarCompanies = useMemo(
-    () => companies.filter((company) => company.status !== "archived"),
+    () => (companies || []).filter((company) => company.status !== "archived"),
     [companies],
   );
 

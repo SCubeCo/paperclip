@@ -105,6 +105,19 @@ export const authApi = {
     return nested;
   },
 
+  startPasswordAuth: async (input: {
+    mode: "sign_in" | "sign_up";
+    email: string;
+    password: string;
+    name?: string;
+  }) => {
+    await authPost("/password/start", input);
+  },
+
+  completePasswordAuth: async (input: { email: string; otp: string }) => {
+    await authPost("/sign-in/email-otp", input);
+  },
+
   signInEmail: async (input: { email: string; password: string }) => {
     await authPost("/sign-in/email", input);
   },

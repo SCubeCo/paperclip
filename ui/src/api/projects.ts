@@ -64,4 +64,89 @@ export const projectsApi = {
     companyId?: string,
   ) =>
     api.post<{ output: string }>(projectPath(id, companyId, "/requirement-analysis/generate"), payload),
+  saveRequirementAnalysis: (
+    id: string,
+    payload: { agentType: "requirement-breakdown" | "sow"; title: string; content: string },
+    companyId?: string,
+  ) =>
+    api.post<{
+      id: string;
+      companyId: string;
+      projectId: string;
+      agentType: string;
+      title: string;
+      content: string;
+      createdAt: string;
+      updatedAt: string;
+    }>(projectPath(id, companyId, "/requirement-analysis/save"), payload),
+  shareRequirementAnalysisWithShovan: (
+    id: string,
+    payload: { agentType: "requirement-breakdown" | "sow"; title: string; content: string },
+    companyId?: string,
+  ) =>
+    api.post<{
+      id: string;
+      status: "pending";
+      shovanEmail: string;
+      createdAt: string;
+    }>(projectPath(id, companyId, "/requirement-analysis/share-with-shovan"), payload),
+  getShareApprovalStatus: (
+    projectId: string,
+    shareId: string,
+    companyId?: string,
+  ) =>
+    api.get<{
+      id: string;
+      status: "pending" | "approved" | "rejected" | "failed" | "client_shared";
+      shovanEmail: string;
+      managerEmail?: string;
+      clientEmail?: string[];
+      createdAt: string;
+      approvedAt?: string;
+    }>(projectPath(projectId, companyId, `/requirement-analysis/share-status/${encodeURIComponent(shareId)}`)),
+  shareRequirementAnalysisWithClient: (
+    projectId: string,
+    payload: { shareId: string },
+    companyId?: string,
+  ) =>
+    api.post<{
+      id: string;
+      status: "client_shared";
+      clientEmail?: string[];
+      updatedAt: string;
+    }>(projectPath(projectId, companyId, "/requirement-analysis/share-with-client"), payload),
+  getLatestRequirementAnalysisShare: (
+    projectId: string,
+    agentType?: "requirement-breakdown" | "sow",
+    companyId?: string,
+  ) =>
+    api.get<{
+      id: string;
+      status: "pending" | "approved" | "rejected" | "failed" | "client_shared";
+      shovanEmail: string;
+      managerEmail?: string;
+      clientEmail?: string[];
+      createdAt: string;
+      approvedAt?: string;
+      rejectedAt?: string;
+    } | null>(
+      projectPath(
+        projectId,
+        companyId,
+        `/requirement-analysis/latest-share${
+          agentType ? `?agentType=${encodeURIComponent(agentType)}` : ""
+        }`,
+      ),
+    ),
+  listSavedRequirementAnalyses: (id: string, companyId?: string) =>
+    api.get<Array<{
+      id: string;
+      companyId: string;
+      projectId: string;
+      agentType: string;
+      title: string;
+      content: string;
+      createdAt: string;
+      updatedAt: string;
+    }>>(projectPath(id, companyId, "/requirement-analysis/saved")),
 };

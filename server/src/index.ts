@@ -475,7 +475,7 @@ export async function startServer(): Promise<StartedServer> {
     config.authPublicBaseUrl = rewriteLocalUrlPort(config.authPublicBaseUrl, listenPort);
   }
   
-  let authReady = config.deploymentMode === "local_trusted";
+  let authReady = false;
   let betterAuthHandler: RequestHandler | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
@@ -483,10 +483,7 @@ export async function startServer(): Promise<StartedServer> {
   let resolveSessionFromHeaders:
     | ((headers: Headers) => Promise<BetterAuthSessionResult | null>)
     | undefined;
-  if (config.deploymentMode === "local_trusted") {
-    await ensureLocalTrustedBoardPrincipal(db as any);
-  }
-  if (config.deploymentMode === "authenticated") {
+  {
     const {
       createBetterAuthHandler,
       createBetterAuthInstance,
@@ -516,7 +513,9 @@ export async function startServer(): Promise<StartedServer> {
     betterAuthHandler = createBetterAuthHandler(auth);
     resolveSession = (req) => resolveBetterAuthSession(auth, req);
     resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
-    await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
+    if (config.deploymentMode === "authenticated") {
+      await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
+    }
     authReady = true;
   }
 

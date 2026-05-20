@@ -57,25 +57,23 @@ export function CloudAccessGate() {
     refetchIntervalInBackground: true,
   });
 
-  const isAuthenticatedMode = healthQuery.data?.deploymentMode === "authenticated";
   const sessionQuery = useQuery({
     queryKey: queryKeys.auth.session,
     queryFn: () => authApi.getSession(),
-    enabled: isAuthenticatedMode,
     retry: false,
   });
 
   const boardAccessQuery = useQuery({
     queryKey: queryKeys.access.currentBoardAccess,
     queryFn: () => accessApi.getCurrentBoardAccess(),
-    enabled: isAuthenticatedMode && !!sessionQuery.data,
+    enabled: !!sessionQuery.data,
     retry: false,
   });
 
   if (
     healthQuery.isLoading ||
-    (isAuthenticatedMode && sessionQuery.isLoading) ||
-    (isAuthenticatedMode && !!sessionQuery.data && boardAccessQuery.isLoading)
+    sessionQuery.isLoading ||
+    (!!sessionQuery.data && boardAccessQuery.isLoading)
   ) {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
   }
@@ -92,18 +90,18 @@ export function CloudAccessGate() {
     );
   }
 
-  if (isAuthenticatedMode && healthQuery.data?.bootstrapStatus === "bootstrap_pending") {
+  if (healthQuery.data?.deploymentMode === "authenticated" && healthQuery.data?.bootstrapStatus === "bootstrap_pending") {
     return <BootstrapPendingPage hasActiveInvite={healthQuery.data.bootstrapInviteActive} />;
   }
 
-  if (isAuthenticatedMode && !sessionQuery.data) {
+  if (!sessionQuery.data) {
     const next = encodeURIComponent(`${location.pathname}${location.search}`);
     return <Navigate to={`/auth?next=${next}`} replace />;
   }
 
   if (
-    isAuthenticatedMode &&
     sessionQuery.data &&
+    !boardAccessQuery.data?.canCreateCompany &&
     !boardAccessQuery.data?.isInstanceAdmin &&
     (boardAccessQuery.data?.companyIds.length ?? 0) === 0
   ) {

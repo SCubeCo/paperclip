@@ -27,6 +27,12 @@ export {
   type UpdateCompanyBranding,
 } from "./company.js";
 export {
+  employeeAvailabilityStatusSchema,
+  employeeExperienceLevelSchema,
+  createEmployeeSchema,
+  type CreateEmployee,
+} from "./employee.js";
+export {
   environmentDriverSchema,
   environmentStatusSchema,
   environmentLeaseStatusSchema,

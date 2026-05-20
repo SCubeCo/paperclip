@@ -101,6 +101,23 @@ describeEmbeddedPostgres("access service", () => {
     expect(unchanged.status).toBe("active");
   });
 
+  it("allows owner role permissions without explicit grant rows", async () => {
+    const { company, owner } = await createCompanyWithOwner(db);
+    const access = accessService(db);
+
+    const canInvite = await access.canUser(company.id, owner.principalId, "users:invite");
+    const canManagePermissions = await access.canUser(
+      company.id,
+      owner.principalId,
+      "users:manage_permissions",
+    );
+    const canCreateAgents = await access.canUser(company.id, owner.principalId, "agents:create");
+
+    expect(canInvite).toBe(true);
+    expect(canManagePermissions).toBe(true);
+    expect(canCreateAgents).toBe(true);
+  });
+
   it("archives members, clears grants, and reassigns open issues without deleting history", async () => {
     const { company, owner } = await createCompanyWithOwner(db);
     const member = await db

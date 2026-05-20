@@ -9,6 +9,7 @@ import {
 } from "@paperclipai/db";
 import type { PermissionKey, PrincipalType } from "@paperclipai/shared";
 import { conflict } from "../errors.js";
+import { grantsForHumanRole, normalizeHumanRole } from "./company-member-roles.js";
 
 type MembershipRow = typeof companyMemberships.$inferSelect;
 type GrantInput = {
@@ -82,6 +83,14 @@ export function accessService(db: Db) {
   ): Promise<boolean> {
     if (!userId) return false;
     if (await isInstanceAdmin(userId)) return true;
+    const membership = await getMembership(companyId, "user", userId);
+    if (!membership || membership.status !== "active") return false;
+
+    const role = normalizeHumanRole(membership.membershipRole, "operator");
+    if (grantsForHumanRole(role).some((grant) => grant.permissionKey === permissionKey)) {
+      return true;
+    }
+
     return hasPermission(companyId, "user", userId, permissionKey);
   }
 

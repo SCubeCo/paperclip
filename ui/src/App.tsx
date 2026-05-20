@@ -191,15 +191,15 @@ function OnboardingRoutePage() {
 }
 
 function CompanyRootRedirect() {
-  const { companies, selectedCompany, loading } = useCompany();
+  const { companies, loading } = useCompany();
   const location = useLocation();
 
   if (loading) {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
   }
 
-  const targetCompany = selectedCompany ?? companies[0] ?? null;
-  if (!targetCompany) {
+  const hasCompanies = companies.length > 0;
+  if (!hasCompanies) {
     if (
       shouldRedirectCompanylessRouteToOnboarding({
         pathname: location.pathname,
@@ -211,7 +211,8 @@ function CompanyRootRedirect() {
     return <NoCompaniesStartPage />;
   }
 
-  return <Navigate to={`/${targetCompany.issuePrefix}/dashboard`} replace />;
+  // After auth, land on company/workspace selection instead of jumping to a dashboard.
+  return <Navigate to="/companies" replace />;
 }
 
 function UnprefixedBoardRedirect() {

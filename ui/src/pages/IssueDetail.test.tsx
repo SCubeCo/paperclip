@@ -1453,6 +1453,7 @@ describe("canBoardResolveRecoveryAction", () => {
     expect(
       canBoardResolveRecoveryAction("company-1", {
         companyIds: ["company-1"],
+        canCreateCompany: false,
         memberships: [],
         isInstanceAdmin: false,
         source: "session",
@@ -1467,6 +1468,7 @@ describe("canBoardResolveRecoveryAction", () => {
     expect(
       canBoardResolveRecoveryAction("company-1", {
         companyIds: ["company-1"],
+        canCreateCompany: false,
         memberships: [
           {
             companyId: "company-1",
