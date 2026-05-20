@@ -55,5 +55,4 @@ jobs:
             --name paperclip-app \
             --resource-group paperclip-rg \
             --image $REGISTRY/$IMAGE_NAME:${{ github.sha }} \
-            --set-env-vars NODE_ENV=production DATABASE_URL=secretref:database-url SERVE_UI=true PORT=3100 BETTER_AUTH_SECRET=secretref:better-auth-secret PAPERCLIP_PUBLIC_URL=${{ secrets.APP_URL }} BETTER_AUTH_URL=${{ secrets.APP_URL }} PAPERCLIP_ALLOWED_HOSTNAMES=${{ secrets.APP_HOSTNAME }}
- 
+            --set-env-vars NODE_ENV=production DATABASE_URL=secretref:database-url SERVE_UI=true PORT=3100 BETTER_AUTH_SECRET=secretref:better-auth-secret PAPERCLIP_PUBLIC_URL=${{ secrets.APP_URL }} BETTER_AUTH_URL=${{ secrets.APP_URL }} PAPERCLIP_ALLOWED_HOSTNAMES=${{ secrets.APP_HOSTNAME }} MS_GRAPH_TENANT_ID=secretref:ms-graph-tenant-id MS_GRAPH_CLIENT_ID=secretref:ms-graph-client-id MS_GRAPH_CLIENT_SECRET=secretref:ms-graph-client-secret MS_GRAPH_SENDER_USER_ID=secretref:ms-graph-sender-user-id PAPERCLIP_SHOVAN_EMAIL=secretref:paperclip-shovan-email
