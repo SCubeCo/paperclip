@@ -125,16 +125,41 @@ export function companyService(db: Db) {
   }
 
   function isIssuePrefixConflict(error: unknown) {
-    const constraint = typeof error === "object" && error !== null && "constraint" in error
-      ? (error as { constraint?: string }).constraint
-      : typeof error === "object" && error !== null && "constraint_name" in error
-        ? (error as { constraint_name?: string }).constraint_name
-        : undefined;
-    return typeof error === "object"
-      && error !== null
-      && "code" in error
-      && (error as { code?: string }).code === "23505"
-      && constraint === "companies_issue_prefix_idx";
+    const stack: unknown[] = [error];
+    const visited = new Set<unknown>();
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current || typeof current !== "object" || visited.has(current)) continue;
+      visited.add(current);
+
+      const code = "code" in current ? (current as { code?: unknown }).code : undefined;
+      const constraint =
+        "constraint" in current
+          ? (current as { constraint?: unknown }).constraint
+          : "constraint_name" in current
+            ? (current as { constraint_name?: unknown }).constraint_name
+            : undefined;
+      const message = "message" in current ? (current as { message?: unknown }).message : undefined;
+
+      if (code === "23505" && constraint === "companies_issue_prefix_idx") {
+        return true;
+      }
+
+      if (
+        typeof message === "string"
+        && message.includes("duplicate key value violates unique constraint")
+        && message.includes("companies_issue_prefix_idx")
+      ) {
+        return true;
+      }
+
+      if ("cause" in current) {
+        stack.push((current as { cause?: unknown }).cause);
+      }
+    }
+
+    return false;
   }
 
   async function createCompanyWithUniquePrefix(data: typeof companies.$inferInsert) {

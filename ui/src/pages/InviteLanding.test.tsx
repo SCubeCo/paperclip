@@ -10,8 +10,8 @@ import { InviteLandingPage } from "./InviteLanding";
 const getInviteMock = vi.hoisted(() => vi.fn());
 const acceptInviteMock = vi.hoisted(() => vi.fn());
 const getSessionMock = vi.hoisted(() => vi.fn());
-const signInEmailMock = vi.hoisted(() => vi.fn());
-const signUpEmailMock = vi.hoisted(() => vi.fn());
+const startPasswordAuthMock = vi.hoisted(() => vi.fn());
+const completePasswordAuthMock = vi.hoisted(() => vi.fn());
 const healthGetMock = vi.hoisted(() => vi.fn());
 const listCompaniesMock = vi.hoisted(() => vi.fn());
 const setSelectedCompanyIdMock = vi.hoisted(() => vi.fn());
@@ -26,8 +26,8 @@ vi.mock("../api/access", () => ({
 vi.mock("../api/auth", () => ({
   authApi: {
     getSession: () => getSessionMock(),
-    signInEmail: (input: unknown) => signInEmailMock(input),
-    signUpEmail: (input: unknown) => signUpEmailMock(input),
+    startPasswordAuth: (input: unknown) => startPasswordAuthMock(input),
+    completePasswordAuth: (input: unknown) => completePasswordAuthMock(input),
   },
 }));
 
@@ -108,8 +108,8 @@ describe("InviteLandingPage", () => {
     });
     listCompaniesMock.mockResolvedValue([]);
     getSessionMock.mockResolvedValue(null);
-    signInEmailMock.mockResolvedValue(undefined);
-    signUpEmailMock.mockResolvedValue(undefined);
+    startPasswordAuthMock.mockResolvedValue(undefined);
+    completePasswordAuthMock.mockResolvedValue(undefined);
     setSelectedCompanyIdMock.mockReset();
   });
 
@@ -120,7 +120,7 @@ describe("InviteLandingPage", () => {
   });
 
   it("defaults invite auth to account creation and guides existing users back to sign in", async () => {
-    signUpEmailMock.mockRejectedValue(
+    startPasswordAuthMock.mockRejectedValue(
       Object.assign(new Error("User already exists. Use another email."), {
         code: "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL",
         status: 422,
@@ -189,7 +189,8 @@ describe("InviteLandingPage", () => {
     await flushReact();
     await flushReact();
 
-    expect(signUpEmailMock).toHaveBeenCalledWith({
+    expect(startPasswordAuthMock).toHaveBeenCalledWith({
+      mode: "sign_up",
       name: "Jane Example",
       email: "jane@example.com",
       password: "supersecret",
@@ -205,7 +206,7 @@ describe("InviteLandingPage", () => {
   });
 
   it("turns invalid sign-in responses into a clear invite-specific message", async () => {
-    signInEmailMock.mockRejectedValue(
+    startPasswordAuthMock.mockRejectedValue(
       Object.assign(new Error("Invalid email or password"), {
         code: "INVALID_EMAIL_OR_PASSWORD",
         status: 401,
@@ -267,7 +268,8 @@ describe("InviteLandingPage", () => {
     await flushReact();
     await flushReact();
 
-    expect(signInEmailMock).toHaveBeenCalledWith({
+    expect(startPasswordAuthMock).toHaveBeenCalledWith({
+      mode: "sign_in",
       email: "jane@example.com",
       password: "wrongpass",
     });
@@ -347,10 +349,31 @@ describe("InviteLandingPage", () => {
     await flushReact();
     await flushReact();
 
-    expect(signUpEmailMock).toHaveBeenCalledWith({
+    expect(startPasswordAuthMock).toHaveBeenCalledWith({
+      mode: "sign_up",
       name: "Jane Example",
       email: "jane@example.com",
       password: "supersecret",
+    });
+    const otpInput = container.querySelector('input[name="otp"]') as HTMLInputElement | null;
+    expect(otpInput).not.toBeNull();
+
+    await act(async () => {
+      inputValueSetter!.call(otpInput, "123456");
+      otpInput!.dispatchEvent(new Event("input", { bubbles: true }));
+      otpInput!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await act(async () => {
+      authForm?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(completePasswordAuthMock).toHaveBeenCalledWith({
+      email: "jane@example.com",
+      otp: "123456",
     });
     expect(acceptInviteMock).toHaveBeenCalledWith("pcp_invite_test", { requestType: "human" });
     expect(setSelectedCompanyIdMock).toHaveBeenCalledWith("company-1", { source: "manual" });
@@ -545,13 +568,127 @@ describe("InviteLandingPage", () => {
     await flushReact();
     await flushReact();
 
-    expect(signInEmailMock).toHaveBeenCalledWith({
+    expect(startPasswordAuthMock).toHaveBeenCalledWith({
+      mode: "sign_in",
       email: "jane@example.com",
       password: "supersecret",
+    });
+    const otpInput = container.querySelector('input[name="otp"]') as HTMLInputElement | null;
+    expect(otpInput).not.toBeNull();
+
+    await act(async () => {
+      inputValueSetter!.call(otpInput, "123456");
+      otpInput!.dispatchEvent(new Event("input", { bubbles: true }));
+      otpInput!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await act(async () => {
+      authForm?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(completePasswordAuthMock).toHaveBeenCalledWith({
+      email: "jane@example.com",
+      otp: "123456",
     });
     expect(acceptInviteMock).not.toHaveBeenCalled();
     expect(setSelectedCompanyIdMock).toHaveBeenCalledWith("company-1", { source: "manual" });
     expect(localStorage.getItem("paperclip:pending-invite-token")).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("continues invite acceptance after OTP when company list refresh fails", async () => {
+    getSessionMock.mockResolvedValueOnce(null);
+    getSessionMock.mockResolvedValue({
+      session: { id: "session-1", userId: "user-1" },
+      user: {
+        id: "user-1",
+        name: "Jane Example",
+        email: "jane@example.com",
+        image: null,
+      },
+    });
+    listCompaniesMock.mockRejectedValue(new Error("Request failed: 403"));
+    acceptInviteMock.mockResolvedValue({
+      id: "join-1",
+      companyId: "company-1",
+      requestType: "human",
+      status: "approved",
+    });
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/invite/pcp_invite_test"]}>
+          <QueryClientProvider client={queryClient}>
+            <Routes>
+              <Route path="/invite/:token" element={<InviteLandingPage />} />
+            </Routes>
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    expect(inputValueSetter).toBeTypeOf("function");
+
+    const nameInput = container.querySelector('input[name="name"]') as HTMLInputElement | null;
+    const emailInput = container.querySelector('input[name="email"]') as HTMLInputElement | null;
+    const passwordInput = container.querySelector('input[name="password"]') as HTMLInputElement | null;
+    expect(nameInput).not.toBeNull();
+    expect(emailInput).not.toBeNull();
+    expect(passwordInput).not.toBeNull();
+
+    await act(async () => {
+      inputValueSetter!.call(nameInput, "Jane Example");
+      nameInput!.dispatchEvent(new Event("input", { bubbles: true }));
+      inputValueSetter!.call(emailInput, "jane@example.com");
+      emailInput!.dispatchEvent(new Event("input", { bubbles: true }));
+      inputValueSetter!.call(passwordInput, "supersecret");
+      passwordInput!.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    const authForm = container.querySelector('[data-testid="invite-inline-auth"]') as HTMLFormElement | null;
+    expect(authForm).not.toBeNull();
+
+    await act(async () => {
+      authForm?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await flushReact();
+    await flushReact();
+
+    const otpInput = container.querySelector('input[name="otp"]') as HTMLInputElement | null;
+    expect(otpInput).not.toBeNull();
+
+    await act(async () => {
+      inputValueSetter!.call(otpInput, "123456");
+      otpInput!.dispatchEvent(new Event("input", { bubbles: true }));
+      otpInput!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await act(async () => {
+      authForm?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(completePasswordAuthMock).toHaveBeenCalledWith({
+      email: "jane@example.com",
+      otp: "123456",
+    });
+    expect(acceptInviteMock).toHaveBeenCalledWith("pcp_invite_test", { requestType: "human" });
+    expect(setSelectedCompanyIdMock).toHaveBeenCalledWith("company-1", { source: "manual" });
 
     await act(async () => {
       root.unmount();

@@ -332,6 +332,19 @@ export type {
   UserCompanyAccessEntry,
   UserCompanyAccessResponse,
 } from "./access.js";
+export type {
+  EmployeeAvailabilityStatus,
+  EmployeeExperienceLevel,
+  EmployeeInvitationSummary,
+  EmployeeManagerRef,
+  EmployeeManagerType,
+  EmployeePersonalAgentSummary,
+  EmployeeRecord,
+  EmployeeWorkforceStatus,
+  EmployeesListResponse,
+  CreateEmployeeInput,
+  CreateEmployeeResponse,
+} from "./employee.js";
 export type { QuotaWindow, ProviderQuotaResult } from "./quota.js";
 export type {
   CompanyPortabilityInclude,

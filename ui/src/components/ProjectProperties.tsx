@@ -45,6 +45,8 @@ export type ProjectConfigFieldKey =
   | "name"
   | "description"
   | "status"
+  | "manager_email"
+  | "client_email"
   | "goals"
   | "env"
   | "execution_workspace_enabled"
@@ -95,6 +97,64 @@ function FieldLabel({
     <div className="flex items-center gap-1.5">
       <span className="text-xs text-muted-foreground">{label}</span>
       <SaveIndicator state={state} />
+    </div>
+  );
+}
+
+function ClientEmailsInput({ emails, onChange }: { emails: string[]; onChange: (emails: string[]) => void }) {
+  const [draft, setDraft] = useState("");
+
+  function addEmail(raw: string) {
+    const trimmed = raw.trim();
+    if (!trimmed) return;
+    if (emails.includes(trimmed)) {
+      setDraft("");
+      return;
+    }
+    onChange([...emails, trimmed]);
+    setDraft("");
+  }
+
+  function removeEmail(email: string) {
+    onChange(emails.filter((e) => e !== email));
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5 w-full">
+      {emails.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {emails.map((email) => (
+            <span
+              key={email}
+              className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-2 py-0.5 text-xs"
+            >
+              {email}
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground"
+                onClick={() => removeEmail(email)}
+                aria-label={`Remove ${email}`}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input
+        type="email"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === ",") {
+            e.preventDefault();
+            addEmail(draft);
+          }
+        }}
+        onBlur={() => addEmail(draft)}
+        className="w-full rounded border border-border bg-transparent px-2 py-1 text-sm outline-none"
+        placeholder="client@company.com"
+      />
     </div>
   );
 }
@@ -547,6 +607,35 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
             />
           ) : (
             <StatusBadge status={project.status} />
+          )}
+        </PropertyRow>
+        <PropertyRow label={<FieldLabel label="Manager Email" state={fieldState("manager_email")} />}>
+          {onUpdate || onFieldUpdate ? (
+            <DraftInput
+              value={project.managerEmail ?? ""}
+              onCommit={(managerEmail) =>
+                commitField("manager_email", { managerEmail: managerEmail.trim() || null })}
+              immediate
+              className="w-full rounded border border-border bg-transparent px-2 py-1 text-sm outline-none"
+              placeholder="manager@company.com"
+            />
+          ) : (
+            <span className="text-sm text-muted-foreground">{project.managerEmail ?? "Not set"}</span>
+          )}
+        </PropertyRow>
+        <PropertyRow label={<FieldLabel label="Client Email" state={fieldState("client_email")} />}>
+          {onUpdate || onFieldUpdate ? (
+            <ClientEmailsInput
+              emails={project.clientEmail ?? []}
+              onChange={(emails) =>
+                commitField("client_email", { clientEmail: emails.length > 0 ? emails : null })}
+            />
+          ) : (
+            <span className="text-sm text-muted-foreground">
+              {(project.clientEmail ?? []).length > 0
+                ? (project.clientEmail ?? []).join(", ")
+                : "Not set"}
+            </span>
           )}
         </PropertyRow>
         {project.leadAgentId && (

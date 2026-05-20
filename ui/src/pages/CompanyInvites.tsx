@@ -178,6 +178,13 @@ export function CompanyInvites() {
         <p className="max-w-3xl text-sm text-muted-foreground">
           Create human invite links for company access. New invite links are copied to your clipboard when they are generated.
         </p>
+        <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+          Need the recipient to get a personal AI assistant too? Use the{' '}
+          <Link to="/company/settings/access" className="underline underline-offset-4 text-foreground">
+            Access
+          </Link>{' '}
+          page to invite an employee. That flow creates the assistant and links it to the new employee record.
+        </div>
       </div>
 
       <section className="space-y-4 rounded-xl border border-border p-5">
@@ -281,7 +288,7 @@ export function CompanyInvites() {
               Review invite status, role, inviter, and any linked join request.
             </p>
           </div>
-          <Link to="/inbox/requests" className="text-sm underline underline-offset-4">
+          <Link to="/inbox/requests?status=all" className="text-sm underline underline-offset-4">
             Open join request queue
           </Link>
         </div>
@@ -324,7 +331,7 @@ export function CompanyInvites() {
                       </td>
                       <td className="px-5 py-3 align-top">
                         {invite.relatedJoinRequestId ? (
-                          <Link to="/inbox/requests" className="underline underline-offset-4">
+                          <Link to="/inbox/requests?status=all" className="underline underline-offset-4">
                             Review request
                           </Link>
                         ) : (

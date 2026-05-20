@@ -5,18 +5,29 @@ import { accessApi } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { useSearchParams } from "@/lib/router";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { useToast } from "@/context/ToastContext";
 import { queryKeys } from "@/lib/queryKeys";
+
+type JoinRequestStatusFilter = "all" | "pending_approval" | "approved" | "rejected";
 
 export function JoinRequestQueue() {
   const { selectedCompany, selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
-  const [status, setStatus] = useState<"pending_approval" | "approved" | "rejected">("pending_approval");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [status, setStatus] = useState<JoinRequestStatusFilter>(() =>
+    parseJoinRequestStatusFilter(searchParams.get("status")),
+  );
   const [requestType, setRequestType] = useState<"all" | "human" | "agent">("all");
+
+  useEffect(() => {
+    const nextStatus = parseJoinRequestStatusFilter(searchParams.get("status"));
+    setStatus((currentStatus) => (currentStatus === nextStatus ? currentStatus : nextStatus));
+  }, [searchParams]);
 
   useEffect(() => {
     setBreadcrumbs([
@@ -31,7 +42,7 @@ export function JoinRequestQueue() {
     queryFn: () =>
       accessApi.listJoinRequests(
         selectedCompanyId!,
-        status,
+        status === "all" ? undefined : status,
         requestType === "all" ? undefined : requestType,
       ),
     enabled: !!selectedCompanyId,
@@ -91,10 +102,19 @@ export function JoinRequestQueue() {
           <select
             className="rounded-md border border-border bg-background px-3 py-2"
             value={status}
-            onChange={(event) =>
-              setStatus(event.target.value as "pending_approval" | "approved" | "rejected")
-            }
+            onChange={(event) => {
+              const nextStatus = event.target.value as JoinRequestStatusFilter;
+              setStatus(nextStatus);
+              const nextParams = new URLSearchParams(searchParams);
+              if (nextStatus === "pending_approval") {
+                nextParams.delete("status");
+              } else {
+                nextParams.set("status", nextStatus);
+              }
+              setSearchParams(nextParams, { replace: true });
+            }}
           >
+            <option value="all">All statuses</option>
             <option value="pending_approval">Pending approval</option>
             <option value="approved">Approved</option>
             <option value="rejected">Rejected</option>
@@ -191,4 +211,11 @@ export function JoinRequestQueue() {
       </div>
     </div>
   );
+}
+
+function parseJoinRequestStatusFilter(raw: string | null): JoinRequestStatusFilter {
+  if (raw === "all" || raw === "approved" || raw === "rejected" || raw === "pending_approval") {
+    return raw;
+  }
+  return "pending_approval";
 }

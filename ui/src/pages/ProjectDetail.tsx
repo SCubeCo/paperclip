@@ -275,6 +275,10 @@ function ProjectPluginOperationsList({
 
 type AgentType = "requirement-breakdown" | "sow";
 
+function isAgentType(value: string): value is AgentType {
+  return value === "requirement-breakdown" || value === "sow";
+}
+
 interface UploadedFile {
   id: string;
   name: string;
@@ -342,14 +346,20 @@ function TrackerStatusChip({ status }: { status: string }) {
         ClickUp
       </span>
     );
+  if (status === "rejected")
+    return (
+      <span className="rounded-full border border-rose-500/20 bg-rose-500/10 px-2 py-0.5 text-xs font-medium text-rose-400">
+        Rejected
+      </span>
+    );
   return null;
 }
 
-const SOW_TRACKER_ITEMS = [
-  { label: "SOW Creator", status: "done" },
-  { label: "SOW Share with", status: "done" },
-  { label: "Shovan Review", status: "pending" },
-  { label: "Share with Client", status: "clickup" },
+const DEFAULT_SOW_TRACKER_ITEMS = [
+  { label: "SOW Created", status: "pending" as const },
+  { label: "Share with Shovan", status: "pending" as const },
+  { label: "Shovan Review", status: "pending" as const },
+  { label: "Share with Client", status: "pending" as const },
 ] as const;
 
 function RequirementAnalysisWorkspace({
@@ -364,13 +374,43 @@ function RequirementAnalysisWorkspace({
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [output, setOutput] = useState<string | null>(null);
+  const [isOutputEdited, setIsOutputEdited] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [isCurrentOutputSaved, setIsCurrentOutputSaved] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
+  const [isSharingWithShovan, setIsSharingWithShovan] = useState(false);
+  const [isSharingWithClient, setIsSharingWithClient] = useState(false);
+  const [shareError, setShareError] = useState<string | null>(null);
+  const [shareWithClientError, setShareWithClientError] = useState<string | null>(null);
+  const [isSharedWithShovan, setIsSharedWithShovan] = useState(false);
+  const [shareId, setShareId] = useState<string | null>(null);
+  const [isShovanApproved, setIsShovanApproved] = useState(false);
+  const [latestShareStatus, setLatestShareStatus] = useState<"none" | "pending" | "approved" | "rejected" | "failed" | "client_shared">("none");
+  const { pushToast } = useToastActions();
+  const [savedAnalyses, setSavedAnalyses] = useState<Array<{
+    id: string; agentType: string; title: string; content: string; createdAt: string;
+  }>>([]);
+  const [selectedSavedId, setSelectedSavedId] = useState<string | null>(null);
 
   const handleAgentSelect = (agent: AgentType) => {
     setSelectedAgent(agent);
-    setOutput(null);
+    const latestForAgent = savedAnalyses.find((row) => row.agentType === agent);
+    if (latestForAgent) {
+      setOutput(latestForAgent.content);
+      setSelectedSavedId(latestForAgent.id);
+      setIsCurrentOutputSaved(true);
+    } else {
+      setOutput(null);
+      setSelectedSavedId(null);
+      setIsCurrentOutputSaved(false);
+    }
+    setIsOutputEdited(false);
     setGenerateError(null);
+    setSaveError(null);
+    setShareError(null);
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -389,6 +429,22 @@ function RequirementAnalysisWorkspace({
     setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
+  const handleRegenerate = async () => {
+    setOutput(null);
+    setIsCurrentOutputSaved(false);
+    setIsOutputEdited(false);
+    setIsSharedWithShovan(false);
+    setShareId(null);
+    setIsShovanApproved(false);
+    setLatestShareStatus("none");
+    setShareWithClientError(null);
+    await handleGenerate();
+  };
+
+  const handleSaveToSharePoint = () => {
+    pushToast({ title: "SharePoint not configured", body: "Set up SharePoint integration in your environment settings to enable this feature.", tone: "info" });
+  };
+
   const handleGenerate = async () => {
     if (!selectedAgent) return;
     setIsGenerating(true);
@@ -401,6 +457,14 @@ function RequirementAnalysisWorkspace({
         companyId,
       );
       setOutput(result.output);
+      setSelectedSavedId(null);
+      setIsCurrentOutputSaved(false);
+      setIsOutputEdited(false);
+      setIsSharedWithShovan(false);
+      setShareId(null);
+      setIsShovanApproved(false);
+      setLatestShareStatus("none");
+      setShareWithClientError(null);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Generation failed. Please try again.";
       setGenerateError(msg);
@@ -409,20 +473,185 @@ function RequirementAnalysisWorkspace({
     }
   };
 
+  // Poll for Shovan approval status
+  useEffect(() => {
+    if (!isSharedWithShovan || !shareId || isShovanApproved) return;
+    const interval = setInterval(() => {
+      projectsApi
+        .getShareApprovalStatus(projectId, shareId, companyId)
+        .then((share) => {
+          setLatestShareStatus(share.status);
+          if (share.status === "approved" || share.status === "client_shared") {
+            setIsShovanApproved(true);
+          }
+          if (share.status === "rejected") {
+            setIsShovanApproved(false);
+          }
+        })
+        .catch(() => {
+          /* ignore errors during polling */
+        });
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [isSharedWithShovan, shareId, isShovanApproved, projectId, companyId]);
+
+  // Restore latest persisted SOW share status so tracker survives reloads.
+  useEffect(() => {
+    if (selectedAgent !== "sow") return;
+
+    let disposed = false;
+    projectsApi
+      .getLatestRequirementAnalysisShare(projectId, "sow", companyId)
+      .then((latestShare) => {
+        if (disposed) return;
+        if (!latestShare) {
+          setIsSharedWithShovan(false);
+          setShareId(null);
+          setIsShovanApproved(false);
+          setLatestShareStatus("none");
+          return;
+        }
+        setIsSharedWithShovan(true);
+        setShareId(latestShare.id);
+        setLatestShareStatus(latestShare.status);
+        setIsShovanApproved(latestShare.status === "approved" || latestShare.status === "client_shared");
+      })
+      .catch(() => {
+        /* non-fatal */
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [selectedAgent, projectId, companyId]);
+
+  const isShovanRejected = latestShareStatus === "rejected";
+  const isSharedWithClient = latestShareStatus === "client_shared";
+  const canReshareWithShovan = latestShareStatus === "rejected" || latestShareStatus === "failed";
+
+  // Load saved analyses on mount
+  useEffect(() => {
+    projectsApi.listSavedRequirementAnalyses(projectId, companyId)
+      .then((rows) => {
+        setSavedAnalyses(rows);
+        if (rows.length === 0) return;
+        const latest = rows[0];
+        setSelectedSavedId(latest.id);
+        setOutput(latest.content);
+        setIsCurrentOutputSaved(true);
+        if (isAgentType(latest.agentType)) {
+          setSelectedAgent(latest.agentType);
+        }
+      })
+      .catch(() => { /* non-fatal */ });
+  }, [projectId, companyId]);
+
+  const handleSave = async () => {
+    if (!output || !selectedAgent) return;
+    setIsSaving(true);
+    setSaveError(null);
+    const agentLabel = selectedAgent === "sow" ? "SOW" : "Requirement Breakdown";
+    const title = `${agentLabel} — ${new Date().toLocaleDateString()}`;
+    try {
+      const saved = await projectsApi.saveRequirementAnalysis(
+        projectId,
+        { agentType: selectedAgent, title, content: output },
+        companyId,
+      );
+      setSavedAnalyses((prev) => [saved, ...prev]);
+      setSelectedSavedId(saved.id);
+      setIsCurrentOutputSaved(true);
+      setIsOutputEdited(false);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Save failed. Please try again.";
+      setSaveError(msg);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleCopy = () => {
-    if (output) void navigator.clipboard.writeText(output);
+    if (!output) return;
+    void navigator.clipboard.writeText(output);
+    setIsCopied(true);
+    window.setTimeout(() => setIsCopied(false), 1500);
   };
 
   const handleDownload = () => {
     if (!output) return;
-    const blob = new Blob([output], { type: "text/markdown" });
+    const wordHtml = [
+      "<html><head><meta charset=\"utf-8\"></head><body>",
+      `<pre style=\"font-family:Calibri,Arial,sans-serif;font-size:11pt;white-space:pre-wrap;\">${output
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")}</pre>`,
+      "</body></html>",
+    ].join("");
+    const blob = new Blob([wordHtml], { type: "application/msword" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "Output.md";
+    a.download = "Output.doc";
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  const handleShareWithShovan = async () => {
+    if (!output || !selectedAgent) return;
+    setIsSharingWithShovan(true);
+    setShareError(null);
+    const agentLabel = selectedAgent === "sow" ? "SOW" : "Requirement Breakdown";
+    const title = `${agentLabel} — ${new Date().toLocaleDateString()}`;
+    try {
+      const response = await projectsApi.shareRequirementAnalysisWithShovan(
+        projectId,
+        { agentType: selectedAgent, title, content: output },
+        companyId,
+      );
+      setIsSharedWithShovan(true);
+      setShareId(response.id);
+      setLatestShareStatus(response.status);
+      setShareWithClientError(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Share with Shovan failed. Please try again.";
+      setShareError(msg);
+    } finally {
+      setIsSharingWithShovan(false);
+    }
+  };
+
+  const handleShareWithClient = async () => {
+    if (!shareId) return;
+    setIsSharingWithClient(true);
+    setShareWithClientError(null);
+    try {
+      const response = await projectsApi.shareRequirementAnalysisWithClient(
+        projectId,
+        { shareId },
+        companyId,
+      );
+      setLatestShareStatus(response.status);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Share with client failed. Please try again.";
+      setShareWithClientError(msg);
+    } finally {
+      setIsSharingWithClient(false);
+    }
+  };
+
+  const getSowTrackerItems = useMemo(() => [
+    { label: "SOW Created", status: output ? ("done" as const) : ("pending" as const) },
+    { label: "Share with Shovan", status: isSharedWithShovan ? ("done" as const) : ("pending" as const) },
+    {
+      label: "Shovan Review",
+      status: isShovanApproved
+        ? ("done" as const)
+        : isShovanRejected
+          ? ("rejected" as const)
+          : ("pending" as const),
+    },
+    { label: "Share with Client", status: isSharedWithClient ? ("done" as const) : ("pending" as const) },
+  ], [output, isSharedWithShovan, isShovanApproved, isShovanRejected, isSharedWithClient]);
 
   const formatSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
@@ -596,7 +825,7 @@ function RequirementAnalysisWorkspace({
                   <h3 className="text-sm font-semibold">Output</h3>
                   <div className="flex items-center gap-2">
                     <span className="rounded border border-border bg-muted px-2 py-0.5 font-mono text-xs text-muted-foreground">
-                      Output.md
+                      Output.doc
                     </span>
                     <button
                       onClick={handleCopy}
@@ -616,11 +845,11 @@ function RequirementAnalysisWorkspace({
                           d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
                         />
                       </svg>
-                      Copy
+                      {isCopied ? "Copied" : "Copy"}
                     </button>
                     <button
                       onClick={handleDownload}
-                      title="Download as .md"
+                      title="Download as .doc"
                       className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                     >
                       <svg
@@ -638,18 +867,50 @@ function RequirementAnalysisWorkspace({
                       </svg>
                       Download
                     </button>
+                    <button
+                      onClick={handleRegenerate}
+                      disabled={isGenerating || !canGenerate}
+                      title="Regenerate output"
+                      className="inline-flex items-center gap-1 rounded-md border border-border bg-muted px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <svg
+                        className={`h-3.5 w-3.5 ${isGenerating ? "animate-spin" : ""}`}
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2}
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                      </svg>
+                      {isGenerating ? "Generating…" : "Regenerate"}
+                    </button>
                   </div>
                 </div>
 
-                {/* Markdown preview */}
-                <div className="max-h-[480px] min-h-[220px] overflow-auto rounded-md border border-border bg-background p-4 font-mono text-xs leading-relaxed text-foreground whitespace-pre-wrap">
-                  {output}
-                </div>
+                {/* Markdown editor */}
+                <textarea
+                  value={output || ""}
+                  onChange={(e) => {
+                    setOutput(e.target.value);
+                    setIsOutputEdited(true);
+                  }}
+                  className="max-h-[480px] min-h-[220px] w-full overflow-auto rounded-md border border-border bg-background p-4 font-mono text-xs leading-relaxed text-foreground resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+                  placeholder="Output will appear here..."
+                />
 
                 {/* Save actions */}
                 <div className="flex flex-wrap gap-2 border-t border-border pt-4">
-                  <Button size="sm">Save</Button>
-                  <Button size="sm" variant="outline" className="gap-1.5">
+                  <Button
+                    size="sm"
+                    onClick={handleSave}
+                    disabled={isSaving || (!isOutputEdited && isCurrentOutputSaved) || !selectedAgent || output.trim().length === 0}
+                  >
+                    {isSaving ? "Saving…" : isOutputEdited ? "Save" : isCurrentOutputSaved ? "Saved" : "Save"}
+                  </Button>
+                  {saveError && (
+                    <p className="w-full text-xs text-destructive">{saveError}</p>
+                  )}
+                  <Button size="sm" variant="outline" className="gap-1.5" onClick={handleSaveToSharePoint}>
                     <svg
                       className="h-3.5 w-3.5"
                       fill="none"
@@ -665,24 +926,68 @@ function RequirementAnalysisWorkspace({
                     </svg>
                     Save to SharePoint
                   </Button>
-                  <Button size="sm" variant="outline">
-                    Save with Shovan
-                  </Button>
+                  {selectedAgent === "sow" && (
+                    <>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={handleShareWithShovan}
+                        disabled={
+                          isSharingWithShovan ||
+                          !selectedAgent ||
+                          output.trim().length === 0 ||
+                          (isSharedWithShovan && !canReshareWithShovan)
+                        }
+                      >
+                        {isSharingWithShovan
+                          ? "Sharing…"
+                          : canReshareWithShovan
+                            ? "Reshare with Shovan"
+                            : isSharedWithShovan
+                              ? "Shared with Shovan"
+                              : "Share with Shovan"}
+                      </Button>
+                      {shareError && (
+                        <p className="w-full text-xs text-destructive">{shareError}</p>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={handleShareWithClient}
+                        disabled={
+                          isSharingWithClient ||
+                          !shareId ||
+                          !isShovanApproved ||
+                          isSharedWithClient
+                        }
+                      >
+                        {isSharingWithClient
+                          ? "Sharing with Client..."
+                          : isSharedWithClient
+                            ? "Shared with Client"
+                            : "Share with Client"}
+                      </Button>
+                      {shareWithClientError && (
+                        <p className="w-full text-xs text-destructive">{shareWithClientError}</p>
+                      )}
+                    </>
+                  )}
                 </div>
               </div>
 
-              {/* SOW Tracker */}
+              {/* SOW Tracker — only for SOW agent */}
+              {selectedAgent === "sow" && (
               <div className="rounded-lg border border-border bg-card p-5 space-y-4">
                 <div className="flex items-center gap-2">
                   <h3 className="text-sm font-semibold">SOW Tracker</h3>
                   <span className="rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
-                    {SOW_TRACKER_ITEMS.filter((i) => i.status === "done").length}/
-                    {SOW_TRACKER_ITEMS.length} complete
+                    {getSowTrackerItems.filter((i) => i.status === "done").length}/
+                    {getSowTrackerItems.length} complete
                   </span>
                 </div>
 
                 <div className="space-y-0.5">
-                  {SOW_TRACKER_ITEMS.map((item, idx) => (
+                  {getSowTrackerItems.map((item, idx) => (
                     <div key={item.label} className="flex items-stretch gap-3">
                       {/* Timeline spine */}
                       <div className="flex flex-col items-center">
@@ -709,7 +1014,7 @@ function RequirementAnalysisWorkspace({
                             <span>{idx + 1}</span>
                           )}
                         </div>
-                        {idx < SOW_TRACKER_ITEMS.length - 1 && (
+                        {idx < getSowTrackerItems.length - 1 && (
                           <div
                             className={`my-0.5 w-px flex-1 ${
                               item.status === "done" ? "bg-emerald-500/30" : "bg-border"
@@ -721,7 +1026,7 @@ function RequirementAnalysisWorkspace({
                       {/* Row content */}
                       <div
                         className={`flex flex-1 items-center justify-between gap-2 rounded-md px-2 py-2 transition-colors hover:bg-muted/60 ${
-                          idx < SOW_TRACKER_ITEMS.length - 1 ? "mb-0.5" : ""
+                          idx < getSowTrackerItems.length - 1 ? "mb-0.5" : ""
                         }`}
                       >
                         <span
@@ -737,6 +1042,7 @@ function RequirementAnalysisWorkspace({
                   ))}
                 </div>
               </div>
+              )}
             </>
           )}
         </>

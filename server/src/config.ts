@@ -180,7 +180,7 @@ export function loadConfig(): Config {
     deploymentModeFromEnvRaw && DEPLOYMENT_MODES.includes(deploymentModeFromEnvRaw as DeploymentMode)
       ? (deploymentModeFromEnvRaw as DeploymentMode)
       : null;
-  const deploymentMode: DeploymentMode = deploymentModeFromEnv ?? fileConfig?.server.deploymentMode ?? "local_trusted";
+  const deploymentMode: DeploymentMode = deploymentModeFromEnv ?? fileConfig?.server.deploymentMode ?? "authenticated";
   const strictModeFromEnv = process.env.PAPERCLIP_SECRETS_STRICT_MODE;
   const secretsStrictMode =
     strictModeFromEnv !== undefined

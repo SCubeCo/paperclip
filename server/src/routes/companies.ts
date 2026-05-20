@@ -1,4 +1,4 @@
-import { Router, type Request } from "express";
+﻿import { Router, type Request } from "express";
 import type { Db } from "@paperclipai/db";
 import {
   DEFAULT_FEEDBACK_DATA_SHARING_TERMS_VERSION,
@@ -25,6 +25,7 @@ import {
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
+import { grantsForHumanRole } from "../services/company-member-roles.js";
 
 export function companyRoutes(db: Db, storage?: StorageService) {
   const router = Router();
@@ -266,11 +267,20 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/", validate(createCompanySchema), async (req, res) => {
     assertBoard(req);
-    if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
+    const canCreateFirstWorkspace = (req.actor.companyIds?.length ?? 0) === 0;
+    if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin || canCreateFirstWorkspace)) {
       throw forbidden("Instance admin required");
     }
     const company = await svc.create(req.body);
-    await access.ensureMembership(company.id, "user", req.actor.userId ?? "local-board", "owner", "active");
+    const ownerUserId = req.actor.userId ?? "local-board";
+    await access.ensureMembership(company.id, "user", ownerUserId, "owner", "active");
+    await access.setPrincipalGrants(
+      company.id,
+      "user",
+      ownerUserId,
+      grantsForHumanRole("owner"),
+      req.actor.userId ?? null,
+    );
     await logActivity(db, {
       companyId: company.id,
       actorType: "user",
@@ -292,6 +302,29 @@ export function companyRoutes(db: Db, storage?: StorageService) {
         req.actor.userId ?? "board",
       );
     }
+    // Auto-create a default assistant agent for the new company
+    const defaultAgent = await agents.create(company.id, {
+      name: "Assistant",
+      role: "general",
+      title: "Personal Assistant",
+      status: "idle",
+      reportsTo: null,
+      capabilities: "General-purpose assistant agent for the company.",
+      adapterType: "process",
+      adapterConfig: {},
+      runtimeConfig: {},
+      spentMonthlyCents: 0,
+      lastHeartbeatAt: null,
+    });
+    await logActivity(db, {
+      companyId: company.id,
+      actorType: "user",
+      actorId: req.actor.userId ?? "board",
+      action: "agent.created",
+      entityType: "agent",
+      entityId: defaultAgent.id,
+      details: { name: defaultAgent.name, role: defaultAgent.role },
+    });
     res.status(201).json(company);
   });
 

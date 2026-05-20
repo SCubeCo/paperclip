@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { Link, useNavigate, useLocation } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import { agentsApi, type OrgNode } from "../api/agents";
+import { accessApi, type EmployeeRecord } from "../api/access";
 import { heartbeatsApi } from "../api/heartbeats";
 import { useCompany } from "../context/CompanyContext";
 import { useDialogActions } from "../context/DialogContext";
@@ -17,7 +18,7 @@ import { relativeTime, cn, agentRouteRef, agentUrl } from "../lib/utils";
 import { PageTabBar } from "../components/PageTabBar";
 import { Tabs } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
-import { Bot, Plus, List, GitBranch, SlidersHorizontal } from "lucide-react";
+import { Bot, Plus, List, GitBranch, SlidersHorizontal, UserRound } from "lucide-react";
 import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
 
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
@@ -39,6 +40,31 @@ function filterAgents(agents: Agent[], tab: FilterTab, showTerminated: boolean):
   return agents
     .filter((a) => matchesFilter(a.status, tab, showTerminated))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function filterEmployees(employees: EmployeeRecord[], tab: FilterTab): EmployeeRecord[] {
+  return employees
+    .filter((employee) => {
+      if (tab === "all") return true;
+      if (tab === "active") return employee.workforceStatus === "active";
+      if (tab === "paused") return employee.workforceStatus === "suspended";
+      if (tab === "error") return false;
+      return true;
+    })
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+}
+
+function getEmployeeStatusLabel(employee: EmployeeRecord): string {
+  if (employee.workforceStatus === "active") return "active";
+  if (employee.workforceStatus === "suspended") return "suspended";
+  if (employee.workforceStatus === "pending_acceptance") return "awaiting approval";
+  return "invited";
+}
+
+function getEmployeeStatusClass(employee: EmployeeRecord): string {
+  if (employee.workforceStatus === "active") return "bg-emerald-500/10 text-emerald-300 border-emerald-500/20";
+  if (employee.workforceStatus === "suspended") return "bg-red-500/10 text-red-300 border-red-500/20";
+  return "bg-amber-500/10 text-amber-200 border-amber-500/20";
 }
 
 function getConfiguredModel(agent: Agent): string | null {
@@ -78,6 +104,12 @@ export function Agents() {
   const { data: agents, isLoading, error } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+
+  const { data: employeesResponse } = useQuery({
+    queryKey: queryKeys.access.employees(selectedCompanyId!),
+    queryFn: () => accessApi.listEmployees(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
 
@@ -128,6 +160,7 @@ export function Agents() {
   }
 
   const filtered = filterAgents(agents ?? [], tab, showTerminated);
+  const filteredEmployees = filterEmployees(employeesResponse?.employees ?? [], tab);
   const filteredOrg = filterOrgTree(orgTree ?? [], tab, showTerminated);
 
   return (
@@ -206,13 +239,15 @@ export function Agents() {
         </div>
       </div>
 
-      {filtered.length > 0 && (
-        <p className="text-xs text-muted-foreground">{filtered.length} agent{filtered.length !== 1 ? "s" : ""}</p>
+      {(filtered.length > 0 || filteredEmployees.length > 0) && (
+        <p className="text-xs text-muted-foreground">
+          {filtered.length} agent{filtered.length !== 1 ? "s" : ""} • {filteredEmployees.length} human{filteredEmployees.length !== 1 ? "s" : ""}
+        </p>
       )}
 
       {error && <p className="text-sm text-destructive">{error.message}</p>}
 
-      {agents && agents.length === 0 && (
+      {agents && agents.length === 0 && filteredEmployees.length === 0 && (
         <EmptyState
           icon={Bot}
           message="Create your first agent to get started."
@@ -284,9 +319,38 @@ export function Agents() {
         </div>
       )}
 
-      {effectiveView === "list" && agents && agents.length > 0 && filtered.length === 0 && (
+      {effectiveView === "list" && filteredEmployees.length > 0 && (
+        <div className="border border-border">
+          <div className="border-b border-border px-4 py-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Humans
+          </div>
+          {filteredEmployees.map((employee) => (
+            <EntityRow
+              key={employee.id}
+              title={employee.displayName}
+              subtitle={`${employee.role}${employee.department ? ` • ${employee.department}` : ""}${employee.personalAgent ? ` • AI ${employee.personalAgent.name}` : ""}`}
+              leading={<UserRound className="h-4 w-4 text-muted-foreground" />}
+              trailing={
+                <div className="flex items-center gap-3">
+                  <span className="hidden sm:block w-36 truncate text-left text-xs text-muted-foreground">
+                    {employee.manager?.displayName ? `Manager: ${employee.manager.displayName}` : "No manager"}
+                  </span>
+                  <span className="hidden sm:block w-28 truncate text-left text-xs text-muted-foreground">
+                    {employee.personalAgent?.status ?? "no assistant"}
+                  </span>
+                  <span className={cn("rounded-full border px-2 py-0.5 text-xs capitalize", getEmployeeStatusClass(employee))}>
+                    {getEmployeeStatusLabel(employee)}
+                  </span>
+                </div>
+              }
+            />
+          ))}
+        </div>
+      )}
+
+      {effectiveView === "list" && agents && agents.length > 0 && filtered.length === 0 && filteredEmployees.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8">
-          No agents match the selected filter.
+          No agents or humans match the selected filter.
         </p>
       )}
 
@@ -299,13 +363,34 @@ export function Agents() {
         </div>
       )}
 
-      {effectiveView === "org" && orgTree && orgTree.length > 0 && filteredOrg.length === 0 && (
+      {effectiveView === "org" && filteredEmployees.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Human workforce</p>
+          <div className="border border-border">
+            {filteredEmployees.map((employee) => (
+              <EntityRow
+                key={employee.id}
+                title={employee.displayName}
+                subtitle={`${employee.role}${employee.department ? ` • ${employee.department}` : ""}${employee.personalAgent ? ` • AI ${employee.personalAgent.name}` : ""}`}
+                leading={<UserRound className="h-4 w-4 text-muted-foreground" />}
+                trailing={
+                  <span className={cn("rounded-full border px-2 py-0.5 text-xs capitalize", getEmployeeStatusClass(employee))}>
+                    {getEmployeeStatusLabel(employee)}
+                  </span>
+                }
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {effectiveView === "org" && orgTree && orgTree.length > 0 && filteredOrg.length === 0 && filteredEmployees.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8">
-          No agents match the selected filter.
+          No agents or humans match the selected filter.
         </p>
       )}
 
-      {effectiveView === "org" && orgTree && orgTree.length === 0 && (
+      {effectiveView === "org" && orgTree && orgTree.length === 0 && filteredEmployees.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8">
           No organizational hierarchy defined.
         </p>

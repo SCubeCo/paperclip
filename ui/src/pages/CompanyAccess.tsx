@@ -68,6 +68,13 @@ export function CompanyAccess() {
   const [draftRole, setDraftRole] = useState<CompanyMember["membershipRole"]>(null);
   const [draftStatus, setDraftStatus] = useState<EditableMemberStatus>("active");
   const [draftGrants, setDraftGrants] = useState<Set<PermissionKey>>(new Set());
+  const [employeeDisplayName, setEmployeeDisplayName] = useState("");
+  const [employeeEmail, setEmployeeEmail] = useState("");
+  const [employeeWorkspaceRole, setEmployeeWorkspaceRole] = useState<NonNullable<CompanyMember["membershipRole"]>>("operator");
+  const [employeeRole, setEmployeeRole] = useState("");
+  const [employeeDepartment, setEmployeeDepartment] = useState("");
+  const [employeeExperienceLevel, setEmployeeExperienceLevel] = useState<"junior" | "mid" | "senior" | "lead">("mid");
+  const [employeeManagerKey, setEmployeeManagerKey] = useState("");
 
   useEffect(() => {
     setBreadcrumbs([
@@ -89,6 +96,12 @@ export function CompanyAccess() {
     enabled: !!selectedCompanyId,
   });
 
+  const employeesQuery = useQuery({
+    queryKey: queryKeys.access.employees(selectedCompanyId ?? ""),
+    queryFn: () => accessApi.listEmployees(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+
   const joinRequestsQuery = useQuery({
     queryKey: queryKeys.access.joinRequests(selectedCompanyId ?? "", "pending_approval"),
     queryFn: () => accessApi.listJoinRequests(selectedCompanyId!, "pending_approval"),
@@ -98,9 +111,56 @@ export function CompanyAccess() {
   const refreshAccessData = async () => {
     if (!selectedCompanyId) return;
     await queryClient.invalidateQueries({ queryKey: queryKeys.access.companyMembers(selectedCompanyId) });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.access.employees(selectedCompanyId) });
     await queryClient.invalidateQueries({ queryKey: queryKeys.access.companyUserDirectory(selectedCompanyId) });
     await queryClient.invalidateQueries({ queryKey: queryKeys.access.joinRequests(selectedCompanyId, "pending_approval") });
   };
+
+  const createEmployeeMutation = useMutation({
+    mutationFn: async () => {
+      if (!employeeManagerKey) {
+        throw new Error("Select a manager before creating an employee.");
+      }
+      const manager = employeeManagerKey.startsWith("agent:")
+        ? { type: "agent" as const, agentId: employeeManagerKey.slice("agent:".length) }
+        : { type: "employee" as const, membershipId: employeeManagerKey.slice("employee:".length) };
+      return accessApi.createEmployee(selectedCompanyId!, {
+        displayName: employeeDisplayName.trim(),
+        email: employeeEmail.trim(),
+        workspaceRole: employeeWorkspaceRole,
+        role: employeeRole.trim(),
+        department: employeeDepartment.trim() || null,
+        experienceLevel: employeeExperienceLevel,
+        manager,
+      });
+    },
+    onSuccess: async () => {
+      setEmployeeDisplayName("");
+      setEmployeeEmail("");
+      setEmployeeWorkspaceRole("operator");
+      setEmployeeRole("");
+      setEmployeeDepartment("");
+      setEmployeeExperienceLevel("mid");
+      setEmployeeManagerKey("");
+      await refreshAccessData();
+      if (selectedCompanyId) {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId) });
+        await queryClient.invalidateQueries({ queryKey: queryKeys.org(selectedCompanyId) });
+      }
+      pushToast({
+        title: "Employee invited",
+        body: "A pending human employee and linked personal AI assistant were created.",
+        tone: "success",
+      });
+    },
+    onError: (error) => {
+      pushToast({
+        title: "Failed to create employee",
+        body: error instanceof Error ? error.message : "Unknown error",
+        tone: "error",
+      });
+    },
+  });
 
   const updateMemberMutation = useMutation({
     mutationFn: async (input: { memberId: string; membershipRole: CompanyMember["membershipRole"]; status: EditableMemberStatus; grants: PermissionKey[] }) => {
@@ -170,6 +230,21 @@ export function CompanyAccess() {
   const removingMember = useMemo(
     () => membersQuery.data?.members.find((member) => member.id === removingMemberId) ?? null,
     [removingMemberId, membersQuery.data?.members],
+  );
+  const managerOptions = useMemo(
+    () => [
+      ...(agentsQuery.data ?? []).map((agent) => ({
+        key: `agent:${agent.id}`,
+        label: `${agent.name} (${agent.role})`,
+      })),
+      ...((employeesQuery.data?.employees ?? [])
+        .filter((employee) => employee.membershipStatus !== "archived")
+        .map((employee) => ({
+          key: `employee:${employee.membershipId}`,
+          label: `${employee.displayName} (${employee.role})`,
+        }))),
+    ],
+    [agentsQuery.data, employeesQuery.data?.employees],
   );
 
   const assignedIssuesQuery = useQuery({
@@ -294,6 +369,124 @@ export function CompanyAccess() {
             Manage human company memberships, status, and grants here.
           </p>
         </div>
+
+        {access?.canInviteUsers ? (
+          <div className="space-y-4 rounded-xl border border-border px-4 py-4">
+            <div>
+              <h3 className="text-sm font-semibold">Invite employee</h3>
+              <p className="text-sm text-muted-foreground">
+                Create a pending human employee, issue their workspace invite, and provision a personal AI assistant that only activates after approval.
+              </p>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Full name</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={employeeDisplayName}
+                  onChange={(event) => setEmployeeDisplayName(event.target.value)}
+                  placeholder="Jordan Lee"
+                />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Email</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  type="email"
+                  value={employeeEmail}
+                  onChange={(event) => setEmployeeEmail(event.target.value)}
+                  placeholder="jordan@example.com"
+                />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Workspace role</span>
+                <select
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={employeeWorkspaceRole}
+                  onChange={(event) =>
+                    setEmployeeWorkspaceRole(event.target.value as NonNullable<CompanyMember["membershipRole"]>)
+                  }
+                >
+                  {Object.entries(HUMAN_COMPANY_MEMBERSHIP_ROLE_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Job title</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={employeeRole}
+                  onChange={(event) => setEmployeeRole(event.target.value)}
+                  placeholder="Product designer"
+                />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Department</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={employeeDepartment}
+                  onChange={(event) => setEmployeeDepartment(event.target.value)}
+                  placeholder="Design"
+                />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Experience level</span>
+                <select
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={employeeExperienceLevel}
+                  onChange={(event) =>
+                    setEmployeeExperienceLevel(event.target.value as "junior" | "mid" | "senior" | "lead")
+                  }
+                >
+                  <option value="junior">Junior</option>
+                  <option value="mid">Mid</option>
+                  <option value="senior">Senior</option>
+                  <option value="lead">Lead</option>
+                </select>
+              </label>
+            </div>
+            <label className="block space-y-2 text-sm">
+              <span className="font-medium">Manager</span>
+              <select
+                className="w-full rounded-md border border-border bg-background px-3 py-2"
+                value={employeeManagerKey}
+                onChange={(event) => setEmployeeManagerKey(event.target.value)}
+              >
+                <option value="">Select a manager</option>
+                {managerOptions.map((option) => (
+                  <option key={option.key} value={option.key}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              {managerOptions.length === 0 ? (
+                <span className="text-xs text-muted-foreground">
+                  Create an agent or employee manager first so this employee has a reporting line.
+                </span>
+              ) : null}
+            </label>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">
+                The linked AI assistant starts paused and only inherits human grants after invite acceptance and board approval.
+              </p>
+              <Button
+                onClick={() => createEmployeeMutation.mutate()}
+                disabled={
+                  createEmployeeMutation.isPending ||
+                  !employeeDisplayName.trim() ||
+                  !employeeEmail.trim() ||
+                  !employeeRole.trim() ||
+                  !employeeManagerKey
+                }
+              >
+                {createEmployeeMutation.isPending ? "Inviting..." : "Invite employee"}
+              </Button>
+            </div>
+          </div>
+        ) : null}
 
         {access?.canApproveJoinRequests && pendingHumanJoinRequests.length > 0 ? (
           <div className="space-y-3 rounded-xl border border-border px-4 py-4">

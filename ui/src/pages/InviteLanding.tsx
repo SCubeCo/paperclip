@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AGENT_ADAPTER_TYPES } from "@paperclipai/shared";
-import type { AgentAdapterType, JoinRequest } from "@paperclipai/shared";
+import type { AgentAdapterType, JoinRequest, Company } from "@paperclipai/shared";
 import { Button } from "@/components/ui/button";
 import { CompanyPatternIcon } from "@/components/CompanyPatternIcon";
 import { useCompany } from "@/context/CompanyContext";
 import { Link, useNavigate, useParams } from "@/lib/router";
 import { accessApi } from "../api/access";
-import { authApi } from "../api/auth";
+import { AuthApiError, authApi } from "../api/auth";
 import { companiesApi } from "../api/companies";
 import { healthApi } from "../api/health";
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
@@ -43,6 +43,14 @@ const panelClassName = "border border-zinc-800 bg-zinc-950/95 p-6";
 const modeButtonBaseClassName =
   "flex-1 border px-3 py-2 text-sm transition-colors";
 
+function useCompanyDashboardPath() {
+  const { selectedCompany } = useCompany();
+  if (selectedCompany?.issuePrefix) {
+    return `/${selectedCompany.issuePrefix}/dashboard`;
+  }
+  return "/dashboard";
+}
+
 function formatHumanRole(role: string | null | undefined) {
   if (!role) return null;
   return role.charAt(0).toUpperCase() + role.slice(1);
@@ -69,7 +77,7 @@ function mapInviteAuthFeedback(
   const message = getAuthErrorMessage(error);
   const emailLabel = email.trim().length > 0 ? email.trim() : "that email";
 
-  if (code === "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL") {
+  if (code === "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL" || code === "USER_ALREADY_EXISTS") {
     return {
       tone: "info",
       message: `An account already exists for ${emailLabel}. Sign in below to continue with this invite.`,
@@ -128,6 +136,14 @@ type AwaitingJoinApprovalPanelProps = {
   claimApiKeyPath?: string | null;
   onboardingTextUrl?: string | null;
 };
+
+function normalizeCompaniesPayload(value: unknown): Company[] {
+  if (Array.isArray(value)) return value as Company[];
+  if (value && typeof value === "object" && Array.isArray((value as { companies?: unknown }).companies)) {
+    return (value as { companies: Company[] }).companies;
+  }
+  return [];
+}
 
 function InviteCompanyLogo({
   companyDisplayName,
@@ -215,6 +231,7 @@ function AwaitingJoinApprovalPanel({
 export function InviteLandingPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const dashboardPath = useCompanyDashboardPath();
   const { setSelectedCompanyId } = useCompany();
   const params = useParams();
   const token = (params.token ?? "").trim();
@@ -222,6 +239,8 @@ export function InviteLandingPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [otp, setOtp] = useState("");
+  const [otpRequired, setOtpRequired] = useState(false);
   const [agentName, setAgentName] = useState("");
   const [adapterType, setAdapterType] = useState<AgentAdapterType>("claude_local");
   const [capabilities, setCapabilities] = useState("");
@@ -253,6 +272,10 @@ export function InviteLandingPage() {
     enabled: !!sessionQuery.data && !!inviteQuery.data?.companyId,
     retry: false,
   });
+  const companyList = useMemo(
+    () => normalizeCompaniesPayload(companiesQuery.data),
+    [companiesQuery.data],
+  );
 
   useEffect(() => {
     if (token) rememberPendingInviteToken(token);
@@ -263,15 +286,23 @@ export function InviteLandingPage() {
   }, [token]);
 
   useEffect(() => {
-    if (!companiesQuery.data || !inviteQuery.data?.companyId) return;
-    const isMember = companiesQuery.data.some(
+    if (companyList.length === 0 || !inviteQuery.data?.companyId) return;
+    const isMember = companyList.some(
       (c) => c.id === inviteQuery.data!.companyId
     );
     if (isMember) {
+      // Ensure the selected company is set before navigating
+      const company = companyList.find((c) => c.id === inviteQuery.data.companyId);
+      setSelectedCompanyId(inviteQuery.data.companyId);
       clearPendingInviteToken(token);
-      navigate("/", { replace: true });
+      // Navigate directly to dashboard with the company prefix - use full page reload
+      if (company?.issuePrefix) {
+        window.location.href = `/${company.issuePrefix}/dashboard`;
+      } else {
+        window.location.href = "/";
+      }
     }
-  }, [companiesQuery.data, inviteQuery.data, token, navigate]);
+  }, [companyList, inviteQuery.data, token, setSelectedCompanyId]);
 
   const invite = inviteQuery.data;
   const isCheckingExistingMembership =
@@ -281,7 +312,7 @@ export function InviteLandingPage() {
   const isCurrentMember =
     Boolean(invite?.companyId) &&
     Boolean(
-      companiesQuery.data?.some((company) => company.id === invite?.companyId),
+      companyList.some((company) => company.id === invite?.companyId),
     );
   const companyName = invite?.companyName?.trim() || null;
   const companyDisplayName = companyName || "this Paperclip company";
@@ -340,11 +371,40 @@ export function InviteLandingPage() {
       clearPendingInviteToken(token);
       const asBootstrap = isBootstrapAcceptancePayload(payload);
       setResult({ kind: asBootstrap ? "bootstrap" : "join", payload });
+      
+      // Invalidate and refetch session to ensure auth is established
       await queryClient.invalidateQueries({ queryKey: queryKeys.auth.session });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.companies.all });
+      
       if (invite?.companyId && isApprovedHumanJoinPayload(payload, showsAgentForm)) {
-        setSelectedCompanyId(invite.companyId, { source: "manual" });
-        navigate("/", { replace: true });
+        // Fetch fresh companies list and set selected company
+        try {
+          // Refetch session to establish credentials
+          await queryClient.fetchQuery({
+            queryKey: queryKeys.auth.session,
+            queryFn: () => authApi.getSession(),
+            retry: 1,
+          });
+          
+          const companiesResult = await queryClient.fetchQuery({
+            queryKey: queryKeys.companies.all,
+            queryFn: () => companiesApi.list(),
+            retry: 2,
+          });
+          const freshCompanies = normalizeCompaniesPayload(companiesResult);
+          const company = freshCompanies.find((c) => c.id === invite.companyId);
+          
+          setSelectedCompanyId(invite.companyId, { source: "manual" });
+          
+          // Use full page reload to ensure session cookie is processed by the browser
+          if (company?.issuePrefix) {
+            window.location.href = `/${company.issuePrefix}/dashboard`;
+          } else {
+            window.location.href = "/";
+          }
+        } catch (err) {
+          console.error("Failed to fetch session/companies after invite acceptance:", err);
+          window.location.href = "/";
+        }
       }
     },
     onError: (err) => {
@@ -361,30 +421,70 @@ export function InviteLandingPage() {
 
   const authMutation = useMutation({
     mutationFn: async () => {
-      if (authMode === "sign_in") {
-        await authApi.signInEmail({ email: email.trim(), password });
-        return;
-      }
-      await authApi.signUpEmail({
-        name: name.trim(),
+      await authApi.startPasswordAuth({
+        mode: authMode,
         email: email.trim(),
         password,
+        ...(authMode === "sign_up" ? { name: name.trim() } : {}),
       });
     },
     onSuccess: async () => {
       setAuthFeedback(null);
+      setOtpRequired(true);
+    },
+    onError: (err) => {
+      const nextFeedback = mapInviteAuthFeedback(err, authMode, email);
+      if (getAuthErrorCode(err) === "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL" || getAuthErrorCode(err) === "USER_ALREADY_EXISTS") {
+        setAuthMode("sign_in");
+        setPassword("");
+      }
+      setAuthFeedback(nextFeedback);
+    },
+  });
+
+  const otpMutation = useMutation({
+    mutationFn: async () => authApi.completePasswordAuth({ email: email.trim(), otp: otp.trim() }),
+    onSuccess: async () => {
+      setAuthFeedback(null);
       rememberPendingInviteToken(token);
+      
+      // Invalidate and refetch session to ensure auth is established
       await queryClient.invalidateQueries({ queryKey: queryKeys.auth.session });
-      const companies = await queryClient.fetchQuery({
-        queryKey: queryKeys.companies.all,
-        queryFn: () => companiesApi.list(),
-        retry: false,
-      });
+      
+      try {
+        // Refetch session to establish credentials
+        await queryClient.fetchQuery({
+          queryKey: queryKeys.auth.session,
+          queryFn: () => authApi.getSession(),
+          retry: 1,
+        });
+      } catch (err) {
+        console.error("Failed to refetch session after OTP auth:", err);
+      }
+      
+      let companies: Company[] = [];
+      try {
+        const companiesResult = await queryClient.fetchQuery({
+          queryKey: queryKeys.companies.all,
+          queryFn: () => companiesApi.list(),
+          retry: 2,
+        });
+        companies = normalizeCompaniesPayload(companiesResult);
+      } catch (err) {
+        console.error("Failed to fetch companies after OTP auth:", err);
+        companies = [];
+      }
 
       if (invite?.companyId && companies.some((company) => company.id === invite.companyId)) {
         clearPendingInviteToken(token);
+        const company = companies.find((c) => c.id === invite.companyId);
         setSelectedCompanyId(invite.companyId, { source: "manual" });
-        navigate("/", { replace: true });
+        // Use full page reload to ensure session cookie is processed
+        if (company?.issuePrefix) {
+          window.location.href = `/${company.issuePrefix}/dashboard`;
+        } else {
+          window.location.href = "/";
+        }
         return;
       }
 
@@ -395,19 +495,25 @@ export function InviteLandingPage() {
       try {
         const payload = await acceptMutation.mutateAsync();
         if (isBootstrapAcceptancePayload(payload)) {
-          navigate("/", { replace: true });
+          const company = companies.find((c) => c.id === invite?.companyId);
+          // Use full page reload to ensure session cookie is processed
+          if (company?.issuePrefix) {
+            window.location.href = `/${company.issuePrefix}/dashboard`;
+          } else {
+            window.location.href = "/";
+          }
         }
-      } catch {
+      } catch (err) {
+        console.error("Failed to accept invite after OTP auth:", err);
         return;
       }
     },
     onError: (err) => {
-      const nextFeedback = mapInviteAuthFeedback(err, authMode, email);
-      if (getAuthErrorCode(err) === "USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL") {
-        setAuthMode("sign_in");
-        setPassword("");
+      if (err instanceof AuthApiError && err.status === 400) {
+        setAuthFeedback({ tone: "error", message: "Invalid or expired verification code." });
+        return;
       }
-      setAuthFeedback(nextFeedback);
+      setAuthFeedback({ tone: "error", message: err instanceof Error ? err.message : "Failed to verify code" });
     },
   });
 
@@ -484,7 +590,7 @@ export function InviteLandingPage() {
           <h1 className="text-lg font-semibold">Bootstrap complete</h1>
           <div className="mt-4">
             <Button asChild className="rounded-none">
-              <Link to="/">Open board</Link>
+              <Link to={dashboardPath}>Open board</Link>
             </Button>
           </div>
         </div>
@@ -518,7 +624,7 @@ export function InviteLandingPage() {
             </div>
             <div className="mt-4">
               <Button asChild className="w-full rounded-none">
-                <Link to="/">Open board</Link>
+                <Link to={dashboardPath}>Open board</Link>
               </Button>
             </div>
           </div>
@@ -673,6 +779,8 @@ export function InviteLandingPage() {
                     }`}
                     onClick={() => {
                       setAuthFeedback(null);
+                      setOtpRequired(false);
+                      setOtp("");
                       setAuthMode("sign_up");
                     }}
                   >
@@ -687,6 +795,8 @@ export function InviteLandingPage() {
                     }`}
                     onClick={() => {
                       setAuthFeedback(null);
+                      setOtpRequired(false);
+                      setOtp("");
                       setAuthMode("sign_in");
                     }}
                   >
@@ -696,10 +806,17 @@ export function InviteLandingPage() {
 
                 <form
                   className="space-y-4"
-                  method="post"
-                  action={authMode === "sign_up" ? "/api/auth/sign-up/email" : "/api/auth/sign-in/email"}
                   onSubmit={(event) => {
                     event.preventDefault();
+                    if (otpRequired) {
+                      if (otpMutation.isPending) return;
+                      if (otp.trim().length < 6) {
+                        setAuthFeedback({ tone: "error", message: "Enter the 6-digit verification code." });
+                        return;
+                      }
+                      otpMutation.mutate();
+                      return;
+                    }
                     if (authMutation.isPending) return;
                     if (!authCanSubmit) {
                       setAuthFeedback({ tone: "error", message: "Please fill in all required fields." });
@@ -709,7 +826,7 @@ export function InviteLandingPage() {
                   }}
                   data-testid="invite-inline-auth"
                 >
-                  {authMode === "sign_up" ? (
+                  {!otpRequired && authMode === "sign_up" ? (
                     <label className="block text-sm">
                       <span className="mb-1 block text-zinc-400">Name</span>
                       <input
@@ -725,7 +842,7 @@ export function InviteLandingPage() {
                       />
                     </label>
                   ) : null}
-                  <label className="block text-sm">
+                  {!otpRequired ? <label className="block text-sm">
                     <span className="mb-1 block text-zinc-400">Email</span>
                     <input
                       name="email"
@@ -739,8 +856,8 @@ export function InviteLandingPage() {
                       autoComplete="email"
                       autoFocus={authMode === "sign_in"}
                     />
-                  </label>
-                  <label className="block text-sm">
+                  </label> : null}
+                  {!otpRequired ? <label className="block text-sm">
                     <span className="mb-1 block text-zinc-400">Password</span>
                     <input
                       name="password"
@@ -753,7 +870,24 @@ export function InviteLandingPage() {
                       }}
                       autoComplete={authMode === "sign_in" ? "current-password" : "new-password"}
                     />
-                  </label>
+                  </label> : null}
+                  {otpRequired ? (
+                    <label className="block text-sm">
+                      <span className="mb-1 block text-zinc-400">Verification code</span>
+                      <input
+                        name="otp"
+                        inputMode="numeric"
+                        className={fieldClassName}
+                        value={otp}
+                        onChange={(event) => {
+                          setOtp(event.target.value.replace(/\D+/g, "").slice(0, 6));
+                          setAuthFeedback(null);
+                        }}
+                        autoComplete="one-time-code"
+                        autoFocus
+                      />
+                    </label>
+                  ) : null}
                   {authFeedback ? (
                     <p
                       className={`text-xs ${
@@ -766,15 +900,30 @@ export function InviteLandingPage() {
                   <Button
                     type="submit"
                     className="w-full rounded-none"
-                    disabled={authMutation.isPending}
-                    aria-disabled={!authCanSubmit || authMutation.isPending}
+                    disabled={authMutation.isPending || otpMutation.isPending}
+                    aria-disabled={otpRequired ? otp.trim().length < 6 || otpMutation.isPending : !authCanSubmit || authMutation.isPending}
                   >
-                    {authMutation.isPending
+                    {authMutation.isPending || otpMutation.isPending
                       ? "Working..."
-                      : authMode === "sign_in"
-                        ? "Sign in and continue"
-                        : "Create account and continue"}
+                      : otpRequired
+                        ? "Verify code and continue"
+                        : authMode === "sign_in"
+                          ? "Continue"
+                          : "Create account and continue"}
                   </Button>
+                  {otpRequired ? (
+                    <button
+                      type="button"
+                      className="w-full text-xs text-zinc-500 underline underline-offset-2"
+                      onClick={() => {
+                        setOtpRequired(false);
+                        setOtp("");
+                        setAuthFeedback(null);
+                      }}
+                    >
+                      Edit email or password
+                    </button>
+                  ) : null}
                 </form>
 
                 <p className="text-xs leading-5 text-zinc-500">

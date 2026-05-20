@@ -136,6 +136,8 @@ describe("CompanyInvites", () => {
     expect(container.textContent).toContain("Company Invites");
     expect(container.textContent).toContain("Create invite");
     expect(container.textContent).toContain("Invite history");
+    expect(container.textContent).toContain("personal AI assistant too");
+    expect(container.textContent).toContain("Access");
     expect(container.textContent).toContain("Board User 25");
     expect(container.textContent).toContain("Board User 21");
     expect(container.textContent).not.toContain("Board User 20");

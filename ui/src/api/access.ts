@@ -157,6 +157,64 @@ export type CompanyUserDirectoryResponse = {
   users: CompanyUserDirectoryEntry[];
 };
 
+export type EmployeeManagerRef = {
+  type: "agent" | "employee";
+  membershipId?: string;
+  agentId?: string;
+  displayName: string | null;
+};
+
+export type EmployeeInvitationSummary = {
+  inviteId: string | null;
+  invitePath: string | null;
+  inviteUrl: string | null;
+  onboardingTextUrl: string | null;
+  emailStatus: "sent" | "skipped" | "failed";
+  emailError: string | null;
+  sentAt: string | null;
+  acceptedAt: string | null;
+};
+
+export type EmployeePersonalAgentSummary = {
+  id: string;
+  name: string;
+  role: string;
+  status: string | null;
+  reportsTo: string | null;
+};
+
+export type EmployeeRecord = {
+  id: string;
+  companyId: string;
+  membershipId: string;
+  membershipStatus: "pending" | "active" | "suspended" | "archived";
+  workforceStatus: "invited" | "pending_acceptance" | "active" | "suspended";
+  workspaceRole: HumanCompanyRole | null;
+  displayName: string;
+  email: string;
+  role: string;
+  department: string | null;
+  experienceLevel: "junior" | "mid" | "senior" | "lead";
+  availabilityStatus: "invited" | "pending_acceptance" | "available" | "busy" | "away" | "suspended";
+  skills: string[];
+  assignedProjects: string[];
+  manager: EmployeeManagerRef | null;
+  invitation: EmployeeInvitationSummary | null;
+  personalAgent: EmployeePersonalAgentSummary | null;
+  memberUser: { id: string | null; email: string | null; name: string | null; image: string | null } | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EmployeesListResponse = {
+  employees: EmployeeRecord[];
+  access: {
+    canCreateEmployees: boolean;
+    canInviteUsers: boolean;
+    canManageMembers: boolean;
+  };
+};
+
 export type CompanyInviteRecord = {
   id: string;
   companyId: string | null;
@@ -238,6 +296,7 @@ export type CurrentBoardAccess = {
   userId: string;
   isInstanceAdmin: boolean;
   companyIds: string[];
+  canCreateCompany: boolean;
   memberships?: Array<{
     companyId: string;
     membershipRole: HumanCompanyRole | "member" | null;
@@ -309,15 +368,40 @@ export const accessApi = {
 
   listJoinRequests: (
     companyId: string,
-    status: "pending_approval" | "approved" | "rejected" = "pending_approval",
+    status?: "pending_approval" | "approved" | "rejected",
     requestType?: "human" | "agent",
-  ) =>
-    api.get<CompanyJoinRequest[]>(
-      `/companies/${companyId}/join-requests?status=${status}${requestType ? `&requestType=${requestType}` : ""}`,
-    ),
+  ) => {
+    const query = new URLSearchParams();
+    if (status) query.set("status", status);
+    if (requestType) query.set("requestType", requestType);
+    const suffix = query.toString();
+    return api.get<CompanyJoinRequest[]>(
+      `/companies/${companyId}/join-requests${suffix ? `?${suffix}` : ""}`,
+    );
+  },
 
   listMembers: (companyId: string) =>
     api.get<CompanyMembersResponse>(`/companies/${companyId}/members`),
+
+  listEmployees: (companyId: string) =>
+    api.get<EmployeesListResponse>(`/companies/${companyId}/employees`),
+
+  createEmployee: (
+    companyId: string,
+    input: {
+      displayName: string;
+      email: string;
+      workspaceRole: HumanCompanyRole;
+      role: string;
+      department?: string | null;
+      experienceLevel?: "junior" | "mid" | "senior" | "lead";
+      skills?: string[];
+      assignedProjects?: string[];
+      manager:
+        | { type: "agent"; agentId: string }
+        | { type: "employee"; membershipId: string };
+    },
+  ) => api.post<{ employee: EmployeeRecord }>(`/companies/${companyId}/employees`, input),
 
   listUserDirectory: (companyId: string) =>
     api.get<CompanyUserDirectoryResponse>(`/companies/${companyId}/user-directory`),

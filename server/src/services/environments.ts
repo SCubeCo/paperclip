@@ -77,6 +77,14 @@ function toEnvironmentLease(row: EnvironmentLeaseRow): EnvironmentLease {
 }
 
 export function environmentService(db: Db) {
+  async function findLocalEnvironment(companyId: string) {
+    return db
+      .select()
+      .from(environments)
+      .where(and(eq(environments.companyId, companyId), eq(environments.driver, "local")))
+      .then((rows) => rows[0] ?? null);
+  }
+
   return {
     list: async (
       companyId: string,
@@ -111,40 +119,43 @@ export function environmentService(db: Db) {
     },
 
     ensureLocalEnvironment: async (companyId: string): Promise<Environment> => {
-      const now = new Date();
-      const row = await db
-        .insert(environments)
-        .values({
-          companyId,
-          name: DEFAULT_LOCAL_ENVIRONMENT_NAME,
-          description: DEFAULT_LOCAL_ENVIRONMENT_DESCRIPTION,
-          driver: "local",
-          status: "active",
-          config: {},
-          metadata: {
-            managedByPaperclip: true,
-            defaultForCompany: true,
-          },
-          createdAt: now,
-          updatedAt: now,
-        })
-        .onConflictDoNothing({
-          target: [environments.companyId, environments.driver],
-          where: sql`${environments.driver} = 'local'`,
-        })
-        .returning()
-        .then((rows) => rows[0] ?? null);
-      if (row) return toEnvironment(row);
+      const existing = await findLocalEnvironment(companyId);
+      if (existing) return toEnvironment(existing);
 
-      const existing = await db
-        .select()
-        .from(environments)
-        .where(and(eq(environments.companyId, companyId), eq(environments.driver, "local")))
-        .then((rows) => rows[0] ?? null);
-      if (!existing) {
+      const now = new Date();
+      try {
+        const row = await db
+          .insert(environments)
+          .values({
+            companyId,
+            name: DEFAULT_LOCAL_ENVIRONMENT_NAME,
+            description: DEFAULT_LOCAL_ENVIRONMENT_DESCRIPTION,
+            driver: "local",
+            status: "active",
+            config: {},
+            metadata: {
+              managedByPaperclip: true,
+              defaultForCompany: true,
+            },
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning()
+          .then((rows) => rows[0] ?? null);
+        if (row) return toEnvironment(row);
+      } catch (error) {
+        const code =
+          typeof error === "object" && error !== null && "code" in error
+            ? (error as { code?: string }).code
+            : undefined;
+        if (code !== "23505") throw error;
+      }
+
+      const createdOrExisting = await findLocalEnvironment(companyId);
+      if (!createdOrExisting) {
         throw new Error("Failed to ensure local environment");
       }
-      return toEnvironment(existing);
+      return toEnvironment(createdOrExisting);
     },
 
     create: async (companyId: string, input: CreateEnvironment): Promise<Environment> => {
