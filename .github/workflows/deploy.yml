@@ -59,22 +59,9 @@ jobs:
  
       - name: Bootstrap first admin (safe to re-run)
         continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          PAPERCLIP_PUBLIC_URL: ${{ secrets.APP_URL }}
+          BETTER_AUTH_URL: ${{ secrets.APP_URL }}
         run: |
-          sleep 15
-          az containerapp job create \
-            --name paperclip-bootstrap \
-            --resource-group paperclip-rg \
-            --environment paperclip-env \
-            --trigger-type Manual \
-            --replica-timeout 120 \
-            --image $REGISTRY/$IMAGE_NAME:${{ github.sha }} \
-            --registry-server $REGISTRY \
-            --registry-username ${{ secrets.ACR_NAME }} \
-            --registry-password $(az acr credential show --name ${{ secrets.ACR_NAME }} --query 'passwords[0].value' -o tsv) \
-            --env-vars DATABASE_URL=secretref:database-url COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-            --secrets database-url=secretref:database-url \
-            --command "pnpm" \
-            --args "paperclipai,auth,bootstrap-ceo" || true
-          az containerapp job start \
-            --name paperclip-bootstrap \
-            --resource-group paperclip-rg || true
+          pnpm paperclipai auth bootstrap-ceo
