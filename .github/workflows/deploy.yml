@@ -55,5 +55,5 @@ jobs:
             --name paperclip-app \
             --resource-group paperclip-rg \
             --image $REGISTRY/$IMAGE_NAME:${{ github.sha }} \
-            --set-env-vars NODE_ENV=production DATABASE_URL=secretref:database-url SERVE_UI=true PORT=3100 BETTER_AUTH_SECRET=secretref:better-auth-secret
-      
+            --set-env-vars NODE_ENV=production DATABASE_URL=secretref:database-url SERVE_UI=true PORT=3100 BETTER_AUTH_SECRET=secretref:better-auth-secret PAPERCLIP_PUBLIC_URL=${{ secrets.APP_URL }} BETTER_AUTH_URL=${{ secrets.APP_URL }} PAPERCLIP_ALLOWED_HOSTNAMES=${{ secrets.APP_HOSTNAME }}
+ 
