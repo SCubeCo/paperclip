@@ -9,7 +9,9 @@ import { CompanyInvites } from "./CompanyInvites";
 import { queryKeys } from "@/lib/queryKeys";
 
 const listInvitesMock = vi.hoisted(() => vi.fn());
+const listAgentsMock = vi.hoisted(() => vi.fn());
 const createCompanyInviteMock = vi.hoisted(() => vi.fn());
+const createEmployeeMock = vi.hoisted(() => vi.fn());
 const revokeInviteMock = vi.hoisted(() => vi.fn());
 const pushToastMock = vi.hoisted(() => vi.fn());
 const setBreadcrumbsMock = vi.hoisted(() => vi.fn());
@@ -20,7 +22,15 @@ vi.mock("@/api/access", () => ({
     listInvites: (companyId: string, options?: unknown) => listInvitesMock(companyId, options),
     createCompanyInvite: (companyId: string, input: unknown) =>
       createCompanyInviteMock(companyId, input),
+    createEmployee: (companyId: string, input: unknown) =>
+      createEmployeeMock(companyId, input),
     revokeInvite: (inviteId: string) => revokeInviteMock(inviteId),
+  },
+}));
+
+vi.mock("@/api/agents", () => ({
+  agentsApi: {
+    list: (companyId: string) => listAgentsMock(companyId),
   },
 }));
 
@@ -47,6 +57,12 @@ async function flushReact() {
     await Promise.resolve();
     await new Promise((resolve) => window.setTimeout(resolve, 0));
   });
+}
+
+function setNativeInputValue(element: HTMLInputElement | HTMLSelectElement, value: string) {
+  const prototype = element instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+  const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
+  descriptor?.set?.call(element, value);
 }
 
 describe("CompanyInvites", () => {
@@ -101,6 +117,22 @@ describe("CompanyInvites", () => {
       allowedJoinTypes: "human",
     });
 
+    listAgentsMock.mockResolvedValue([
+      {
+        id: "agent-1",
+        name: "CEO",
+        role: "ceo",
+      },
+    ]);
+
+    createEmployeeMock.mockResolvedValue({
+      employee: {
+        invitation: {
+          inviteUrl: "https://paperclip.local/invite/employee-token",
+        },
+      },
+    });
+
     revokeInviteMock.mockResolvedValue(undefined);
 
     Object.defineProperty(globalThis.navigator, "clipboard", {
@@ -135,6 +167,7 @@ describe("CompanyInvites", () => {
 
     expect(container.textContent).toContain("Company Invites");
     expect(container.textContent).toContain("Create invite");
+    expect(container.textContent).toContain("Create linked personal AI assistant");
     expect(container.textContent).toContain("Invite history");
     expect(container.textContent).toContain("personal AI assistant too");
     expect(container.textContent).toContain("Access");
@@ -225,6 +258,117 @@ describe("CompanyInvites", () => {
     await flushReact();
 
     expect(revokeInviteMock).toHaveBeenCalledWith("invite-25");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("can create an employee invite with a linked personal AI assistant from the invites page", async () => {
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <QueryClientProvider client={queryClient}>
+            <CompanyInvites />
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const assistantToggle = container.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+
+    await act(async () => {
+      assistantToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      assistantToggle?.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(listAgentsMock).toHaveBeenCalledWith("company-1");
+    expect(container.textContent).toContain("Assistant setup");
+    expect(container.textContent).toContain("Create invite and agent");
+
+    const nameInput = Array.from(container.querySelectorAll("input")).find(
+      (input) => (input as HTMLInputElement).placeholder === "Jordan Lee",
+    ) as HTMLInputElement | undefined;
+    const emailInput = Array.from(container.querySelectorAll('input[type="email"]')).find(
+      (input) => (input as HTMLInputElement).placeholder === "jordan@example.com",
+    ) as HTMLInputElement | undefined;
+    const roleInput = Array.from(container.querySelectorAll("input")).find(
+      (input) => (input as HTMLInputElement).placeholder === "Product designer",
+    ) as HTMLInputElement | undefined;
+    const departmentInput = Array.from(container.querySelectorAll("input")).find(
+      (input) => (input as HTMLInputElement).placeholder === "Design",
+    ) as HTMLInputElement | undefined;
+    const selects = Array.from(container.querySelectorAll("select")) as HTMLSelectElement[];
+    const experienceSelect = selects[0];
+    const managerSelect = selects[1];
+
+    await act(async () => {
+      if (nameInput) {
+        setNativeInputValue(nameInput, "Jordan Lee");
+        nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+        nameInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (emailInput) {
+        setNativeInputValue(emailInput, "jordan@example.com");
+        emailInput.dispatchEvent(new Event("input", { bubbles: true }));
+        emailInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (roleInput) {
+        setNativeInputValue(roleInput, "Product designer");
+        roleInput.dispatchEvent(new Event("input", { bubbles: true }));
+        roleInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (departmentInput) {
+        setNativeInputValue(departmentInput, "Design");
+        departmentInput.dispatchEvent(new Event("input", { bubbles: true }));
+        departmentInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (experienceSelect) {
+        setNativeInputValue(experienceSelect, "senior");
+        experienceSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (managerSelect) {
+        setNativeInputValue(managerSelect, "agent-1");
+        managerSelect.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    await flushReact();
+
+    const createButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Create invite and agent",
+    );
+
+    await act(async () => {
+      createButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(createEmployeeMock).toHaveBeenCalledWith("company-1", {
+      displayName: "Jordan Lee",
+      email: "jordan@example.com",
+      workspaceRole: "operator",
+      role: "Product designer",
+      department: "Design",
+      experienceLevel: "senior",
+      manager: { type: "agent", agentId: "agent-1" },
+    });
+    expect(clipboardWriteTextMock).toHaveBeenCalledWith("https://paperclip.local/invite/employee-token");
+    expect(container.textContent).toContain("https://paperclip.local/invite/employee-token");
+    expect(pushToastMock).toHaveBeenCalledWith({
+      title: "Employee invite created",
+      body: "Invite with linked personal AI assistant is ready below and copied to clipboard.",
+      tone: "success",
+    });
 
     await act(async () => {
       root.unmount();

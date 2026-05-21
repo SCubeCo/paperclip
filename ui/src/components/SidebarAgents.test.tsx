@@ -14,6 +14,10 @@ const mockAgentsApi = vi.hoisted(() => ({
   resume: vi.fn(),
 }));
 
+const mockAccessApi = vi.hoisted(() => ({
+  listUserDirectory: vi.fn(),
+}));
+
 const mockAuthApi = vi.hoisted(() => ({
   getSession: vi.fn(),
 }));
@@ -81,6 +85,10 @@ vi.mock("../context/ToastContext", () => ({
 
 vi.mock("../api/agents", () => ({
   agentsApi: mockAgentsApi,
+}));
+
+vi.mock("../api/access", () => ({
+  accessApi: mockAccessApi,
 }));
 
 vi.mock("../api/auth", () => ({
@@ -188,6 +196,15 @@ describe("SidebarAgents", () => {
     mockAgentsApi.list.mockResolvedValue([makeAgent({})]);
     mockAgentsApi.pause.mockResolvedValue(makeAgent({ status: "paused" }));
     mockAgentsApi.resume.mockResolvedValue(makeAgent({}));
+    mockAccessApi.listUserDirectory.mockResolvedValue({
+      users: [
+        {
+          principalId: "user-1",
+          status: "active",
+          user: { id: "user-1", email: "jane@example.com", name: "Jane Example", image: null },
+        },
+      ],
+    });
     mockAuthApi.getSession.mockResolvedValue({
       session: { id: "session-1", userId: "user-1" },
       user: { id: "user-1" },
@@ -259,6 +276,16 @@ describe("SidebarAgents", () => {
     const browseLink = Array.from(document.body.querySelectorAll("a"))
       .find((element) => element.textContent?.includes("Browse agents"));
     expect(browseLink?.getAttribute("href")).toBe("/agents/all");
+  });
+
+  it("renders active company users under the sidebar Agents area", async () => {
+    await renderSidebarAgents();
+
+    expect(container.textContent).toContain("Users");
+    const userLink = Array.from(container.querySelectorAll('a[href^="/u/"]'))
+      .find((anchor) => anchor.textContent?.includes("Jane Example"));
+    expect(userLink?.getAttribute("href")).toBe("/u/user-1");
+    expect(container.textContent).not.toContain("Archived User");
   });
 
   it("sorts alphabetically and persists the selected mode per company and user", async () => {

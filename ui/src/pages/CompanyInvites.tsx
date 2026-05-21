@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ExternalLink, MailPlus } from "lucide-react";
 import { accessApi } from "@/api/access";
+import { agentsApi } from "@/api/agents";
 import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
@@ -50,6 +51,13 @@ export function CompanyInvites() {
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
   const [humanRole, setHumanRole] = useState<"owner" | "admin" | "operator" | "viewer">("operator");
+  const [createLinkedAssistant, setCreateLinkedAssistant] = useState(false);
+  const [employeeDisplayName, setEmployeeDisplayName] = useState("");
+  const [employeeEmail, setEmployeeEmail] = useState("");
+  const [employeeRole, setEmployeeRole] = useState("");
+  const [employeeDepartment, setEmployeeDepartment] = useState("");
+  const [employeeExperienceLevel, setEmployeeExperienceLevel] = useState<"junior" | "mid" | "senior" | "lead">("mid");
+  const [managerAgentId, setManagerAgentId] = useState("");
   const [latestInviteUrl, setLatestInviteUrl] = useState<string | null>(null);
   const [latestInviteCopied, setLatestInviteCopied] = useState(false);
 
@@ -88,6 +96,11 @@ export function CompanyInvites() {
   }, [selectedCompany?.name, setBreadcrumbs]);
 
   const inviteHistoryQueryKey = queryKeys.access.invites(selectedCompanyId ?? "", "all", INVITE_HISTORY_PAGE_SIZE);
+  const agentsQuery = useQuery({
+    queryKey: queryKeys.agents.list(selectedCompanyId ?? ""),
+    queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId) && createLinkedAssistant,
+  });
   const invitesQuery = useInfiniteQuery({
     queryKey: inviteHistoryQueryKey,
     queryFn: ({ pageParam }) =>
@@ -106,6 +119,13 @@ export function CompanyInvites() {
       ) ?? [],
     [invitesQuery.data?.pages],
   );
+
+  useEffect(() => {
+    if (!createLinkedAssistant) return;
+    if (!agentsQuery.data || agentsQuery.data.length === 0) return;
+    if (managerAgentId && agentsQuery.data.some((agent) => agent.id === managerAgentId)) return;
+    setManagerAgentId(agentsQuery.data[0]?.id ?? "");
+  }, [createLinkedAssistant, agentsQuery.data, managerAgentId]);
 
   const createInviteMutation = useMutation({
     mutationFn: () =>
@@ -129,6 +149,46 @@ export function CompanyInvites() {
     onError: (error) => {
       pushToast({
         title: "Failed to create invite",
+        body: error instanceof Error ? error.message : "Unknown error",
+        tone: "error",
+      });
+    },
+  });
+
+  const createEmployeeMutation = useMutation({
+    mutationFn: () =>
+      accessApi.createEmployee(selectedCompanyId!, {
+        displayName: employeeDisplayName.trim(),
+        email: employeeEmail.trim(),
+        workspaceRole: humanRole,
+        role: employeeRole.trim(),
+        department: employeeDepartment.trim() || null,
+        experienceLevel: employeeExperienceLevel,
+        manager: { type: "agent", agentId: managerAgentId },
+      }),
+    onSuccess: async ({ employee }) => {
+      const inviteUrl = employee.invitation?.inviteUrl ?? null;
+      setLatestInviteUrl(inviteUrl);
+      setLatestInviteCopied(false);
+      const copied = inviteUrl ? await copyInviteUrl(inviteUrl) : false;
+
+      await queryClient.invalidateQueries({ queryKey: inviteHistoryQueryKey });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.access.employees(selectedCompanyId!) });
+      await queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
+
+      pushToast({
+        title: "Employee invite created",
+        body: inviteUrl
+          ? copied
+            ? "Invite with linked personal AI assistant is ready below and copied to clipboard."
+            : "Invite with linked personal AI assistant is ready below."
+          : "Employee and linked personal AI assistant were created.",
+        tone: "success",
+      });
+    },
+    onError: (error) => {
+      pushToast({
+        title: "Failed to create employee invite",
         body: error instanceof Error ? error.message : "Unknown error",
         tone: "error",
       });
@@ -179,11 +239,11 @@ export function CompanyInvites() {
           Create human invite links for company access. New invite links are copied to your clipboard when they are generated.
         </p>
         <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
-          Need the recipient to get a personal AI assistant too? Use the{' '}
+          Need the recipient to get a personal AI assistant too? Turn on the linked assistant option below, or use the{' '}
           <Link to="/company/settings/access" className="underline underline-offset-4 text-foreground">
             Access
           </Link>{' '}
-          page to invite an employee. That flow creates the assistant and links it to the new employee record.
+          page for the full employee setup flow.
         </div>
       </div>
 
@@ -231,13 +291,136 @@ export function CompanyInvites() {
           </div>
         </fieldset>
 
+        <label className="flex items-start gap-3 rounded-lg border border-border px-4 py-3 text-sm">
+          <input
+            type="checkbox"
+            checked={createLinkedAssistant}
+            onChange={(event) => setCreateLinkedAssistant(event.target.checked)}
+            className="mt-1 h-4 w-4 border-border text-foreground"
+          />
+          <span className="space-y-1">
+            <span className="block font-medium text-foreground">Create linked personal AI assistant</span>
+            <span className="block text-muted-foreground">
+              Reuses the employee invite flow so the recipient gets a personal assistant agent linked to their membership.
+            </span>
+          </span>
+        </label>
+
+        {createLinkedAssistant ? (
+          <div className="space-y-4 rounded-xl border border-border px-4 py-4">
+            <div>
+              <h3 className="text-sm font-semibold">Assistant setup</h3>
+              <p className="text-sm text-muted-foreground">
+                This creates the employee invite and provisions their personal AI assistant in one step.
+              </p>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Full name</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={employeeDisplayName}
+                  onChange={(event) => setEmployeeDisplayName(event.target.value)}
+                  placeholder="Jordan Lee"
+                />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Email</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  type="email"
+                  value={employeeEmail}
+                  onChange={(event) => setEmployeeEmail(event.target.value)}
+                  placeholder="jordan@example.com"
+                />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Job title</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={employeeRole}
+                  onChange={(event) => setEmployeeRole(event.target.value)}
+                  placeholder="Product designer"
+                />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Department</span>
+                <input
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={employeeDepartment}
+                  onChange={(event) => setEmployeeDepartment(event.target.value)}
+                  placeholder="Design"
+                />
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Experience level</span>
+                <select
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={employeeExperienceLevel}
+                  onChange={(event) =>
+                    setEmployeeExperienceLevel(event.target.value as "junior" | "mid" | "senior" | "lead")
+                  }
+                >
+                  <option value="junior">Junior</option>
+                  <option value="mid">Mid</option>
+                  <option value="senior">Senior</option>
+                  <option value="lead">Lead</option>
+                </select>
+              </label>
+              <label className="space-y-2 text-sm">
+                <span className="font-medium">Manager</span>
+                <select
+                  className="w-full rounded-md border border-border bg-background px-3 py-2"
+                  value={managerAgentId}
+                  onChange={(event) => setManagerAgentId(event.target.value)}
+                >
+                  <option value="">Select a manager</option>
+                  {(agentsQuery.data ?? []).map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name} ({agent.role})
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {agentsQuery.data && agentsQuery.data.length === 0 ? (
+              <div className="text-xs text-muted-foreground">
+                Create an agent manager first so the linked assistant has a reporting line.
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="rounded-lg border border-border px-4 py-3 text-sm text-muted-foreground">
           Each invite link is single-use. The first successful use consumes the link and creates or reuses the matching join request before approval.
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={() => createInviteMutation.mutate()} disabled={createInviteMutation.isPending}>
-            {createInviteMutation.isPending ? "Creating…" : "Create invite"}
+          <Button
+            onClick={() => {
+              if (createLinkedAssistant) {
+                createEmployeeMutation.mutate();
+                return;
+              }
+              createInviteMutation.mutate();
+            }}
+            disabled={
+              createLinkedAssistant
+                ? createEmployeeMutation.isPending ||
+                  !employeeDisplayName.trim() ||
+                  !employeeEmail.trim() ||
+                  !employeeRole.trim() ||
+                  !managerAgentId
+                : createInviteMutation.isPending
+            }
+          >
+            {createLinkedAssistant
+              ? createEmployeeMutation.isPending
+                ? "Creating…"
+                : "Create invite and agent"
+              : createInviteMutation.isPending
+                ? "Creating…"
+                : "Create invite"}
           </Button>
           <span className="text-sm text-muted-foreground">Invite history below keeps the audit trail.</span>
         </div>

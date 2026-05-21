@@ -1084,6 +1084,25 @@ function actorHasActiveUserMembership(req: Request, companyId: string) {
   );
 }
 
+async function findUserCompanyMembership(
+  db: Db,
+  companyId: string,
+  userId: string,
+) {
+  return db
+    .select()
+    .from(companyMemberships)
+    .where(
+      and(
+        eq(companyMemberships.companyId, companyId),
+        eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.principalId, userId),
+        inArray(companyMemberships.status, ["active", "suspended", "archived"]),
+      ),
+    )
+    .then((rows) => rows[0] ?? null);
+}
+
 async function loadUsersById(db: Db, userIds: string[]) {
   if (userIds.length === 0) return new Map<string, ReturnType<typeof toUserProfile>>();
   const rows = await db
@@ -2165,6 +2184,19 @@ function buildEmployeeAssistantName(displayName: string) {
   return `${firstName} Assistant`;
 }
 
+function buildEmployeeAssistantNameFromProfile(input: {
+  displayName: unknown;
+  email: unknown;
+}) {
+  const displayName = nonEmptyTrimmedString(input.displayName);
+  if (displayName) return buildEmployeeAssistantName(displayName);
+
+  const email = nonEmptyTrimmedString(input.email);
+  if (!email) return "Assistant";
+  const localPart = email.split("@")[0]?.trim() ?? "";
+  return buildEmployeeAssistantName(localPart || email);
+}
+
 function buildEmployeeAssistantCapabilities(role: string, department: string | null | undefined) {
   return [
     `Personal AI copilot for the human employee in role ${role}.`,
@@ -2185,6 +2217,221 @@ function extractEmployeeInviteDefaults(defaultsPayload: Record<string, unknown> 
     personalAgentId: typeof human.personalAgentId === "string" ? human.personalAgentId : null,
     invitedEmail: typeof human.invitedEmail === "string" ? human.invitedEmail : null,
   };
+}
+
+export async function reconcileEmployeeInviteForExistingMember(input: {
+  db: Db;
+  access: ReturnType<typeof accessService>;
+  agents: ReturnType<typeof agentService>;
+  req: Request;
+  invite: typeof invites.$inferSelect;
+  companyId: string;
+  actorUserId: string;
+  actorEmail: string | null;
+  employeeMembershipId: string;
+}) {
+  const currentMembership = await input.db
+    .select()
+    .from(companyMemberships)
+    .where(
+      and(
+        eq(companyMemberships.companyId, input.companyId),
+        eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.principalId, input.actorUserId),
+        inArray(companyMemberships.status, ["active", "suspended", "archived"]),
+      ),
+    )
+    .then((rows) => rows.find((row) => row.status === "active") ?? rows[0] ?? null);
+  if (!currentMembership) {
+    throw conflict("Membership not found for this account");
+  }
+
+  const membershipRole = resolveHumanInviteRole(
+    input.invite.defaultsPayload as Record<string, unknown> | null,
+  );
+  const now = new Date();
+
+  const created = await input.db.transaction(async (tx) => {
+    await tx
+      .update(invites)
+      .set({ acceptedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(invites.id, input.invite.id),
+          isNull(invites.revokedAt),
+        ),
+      );
+
+    const placeholderProfile = await tx
+      .select()
+      .from(employeeProfiles)
+      .where(
+        and(
+          eq(employeeProfiles.companyId, input.companyId),
+          eq(employeeProfiles.membershipId, input.employeeMembershipId),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+    const activeProfile = await tx
+      .select()
+      .from(employeeProfiles)
+      .where(
+        and(
+          eq(employeeProfiles.companyId, input.companyId),
+          eq(employeeProfiles.membershipId, currentMembership.id),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+
+    if (placeholderProfile) {
+      const placeholderMetadata = normalizeEmployeeMetadata(placeholderProfile.metadata);
+      const invitation = {
+        ...(placeholderMetadata.invitation ?? {}),
+        acceptedAt: now.toISOString(),
+      };
+
+      if (activeProfile) {
+        const activeMetadata = normalizeEmployeeMetadata(activeProfile.metadata);
+        await tx
+          .update(employeeProfiles)
+          .set({
+            availabilityStatus: "pending_acceptance",
+            metadata: {
+              ...placeholderMetadata,
+              ...activeMetadata,
+              invitation: {
+                ...invitation,
+                ...(activeMetadata.invitation ?? {}),
+              },
+              personalAgentId:
+                activeMetadata.personalAgentId ?? placeholderMetadata.personalAgentId ?? null,
+            },
+            updatedAt: now,
+          })
+          .where(eq(employeeProfiles.id, activeProfile.id));
+      } else {
+        await tx
+          .update(employeeProfiles)
+          .set({
+            membershipId: currentMembership.id,
+            availabilityStatus: "pending_acceptance",
+            metadata: {
+              ...placeholderMetadata,
+              invitation,
+            },
+            updatedAt: now,
+          })
+          .where(eq(employeeProfiles.id, placeholderProfile.id));
+      }
+    } else if (activeProfile) {
+      const activeMetadata = normalizeEmployeeMetadata(activeProfile.metadata);
+      await tx
+        .update(employeeProfiles)
+        .set({
+          availabilityStatus: "pending_acceptance",
+          metadata: {
+            ...activeMetadata,
+            invitation: {
+              ...(activeMetadata.invitation ?? {}),
+              acceptedAt: now.toISOString(),
+            },
+          },
+          updatedAt: now,
+        })
+        .where(eq(employeeProfiles.id, activeProfile.id));
+    }
+
+    if (input.employeeMembershipId !== currentMembership.id) {
+      await tx
+        .update(employeeAiAgentLinks)
+        .set({ membershipId: currentMembership.id, updatedAt: now })
+        .where(
+          and(
+            eq(employeeAiAgentLinks.companyId, input.companyId),
+            eq(employeeAiAgentLinks.membershipId, input.employeeMembershipId),
+          ),
+        );
+      await tx
+        .update(companyMemberships)
+        .set({ status: "archived", updatedAt: now })
+        .where(
+          and(
+            eq(companyMemberships.companyId, input.companyId),
+            eq(companyMemberships.id, input.employeeMembershipId),
+          ),
+        );
+    }
+
+    await tx
+      .update(companyMemberships)
+      .set({ membershipRole, status: "active", updatedAt: now })
+      .where(
+        and(
+          eq(companyMemberships.companyId, input.companyId),
+          eq(companyMemberships.id, currentMembership.id),
+        ),
+      );
+
+    const existingJoinRequest = await tx
+      .select()
+      .from(joinRequests)
+      .where(eq(joinRequests.inviteId, input.invite.id))
+      .then((rows) => rows[0] ?? null);
+    if (existingJoinRequest) {
+      return tx
+        .update(joinRequests)
+        .set({
+          requestType: "human",
+          status: "approved",
+          requestingUserId: input.actorUserId,
+          requestEmailSnapshot: input.actorEmail,
+          approvedAt: now,
+          approvedByUserId: input.req.actor.userId ?? null,
+          updatedAt: now,
+        })
+        .where(eq(joinRequests.id, existingJoinRequest.id))
+        .returning()
+        .then((rows) => rows[0] ?? existingJoinRequest);
+    }
+
+    return tx
+      .insert(joinRequests)
+      .values({
+        inviteId: input.invite.id,
+        companyId: input.companyId,
+        requestType: "human",
+        status: "approved",
+        requestIp: requestIp(input.req),
+        requestingUserId: input.actorUserId,
+        requestEmailSnapshot: input.actorEmail,
+        approvedAt: now,
+        approvedByUserId: input.req.actor.userId ?? null,
+      })
+      .returning()
+      .then((rows) => rows[0]);
+  });
+
+  const grants = humanJoinGrantsFromDefaults(
+    input.invite.defaultsPayload as Record<string, unknown> | null,
+    membershipRole,
+  );
+  await input.access.setPrincipalGrants(
+    input.companyId,
+    "user",
+    input.actorUserId,
+    grants,
+    input.req.actor.userId ?? null,
+  );
+  await syncEmployeeMembershipState(
+    input.db,
+    input.access,
+    input.agents,
+    input.companyId,
+    currentMembership.id,
+    input.req.actor.userId ?? null,
+  );
+
+  return created;
 }
 
 async function resolveActorEmail(db: Db, req: Request): Promise<string | null> {
@@ -2374,7 +2621,39 @@ async function loadEmployeeRecords(db: Db, companyId: string) {
   });
 }
 
-async function syncEmployeeMembershipState(
+async function findCompanyCeoAgent(
+  db: Db,
+  companyId: string,
+): Promise<{
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+  reportsTo: string | null;
+} | null> {
+  const candidates = await db
+    .select({
+      id: dbAgents.id,
+      name: dbAgents.name,
+      role: dbAgents.role,
+      status: dbAgents.status,
+      reportsTo: dbAgents.reportsTo,
+    })
+    .from(dbAgents)
+    .where(
+      and(
+        eq(dbAgents.companyId, companyId),
+        eq(dbAgents.role, "ceo"),
+        ne(dbAgents.status, "terminated"),
+      ),
+    );
+
+  if (candidates.length === 0) return null;
+  const ceoId = resolveJoinRequestAgentManagerId(candidates);
+  return candidates.find((candidate) => candidate.id === ceoId) ?? candidates[0] ?? null;
+}
+
+export async function syncEmployeeMembershipState(
   db: Db,
   access: ReturnType<typeof accessService>,
   agents: ReturnType<typeof agentService>,
@@ -2414,7 +2693,7 @@ async function syncEmployeeMembershipState(
       .where(eq(employeeProfiles.id, profile.id));
   }
 
-  const links = await db
+  let links = await db
     .select({ agentId: employeeAiAgentLinks.agentId })
     .from(employeeAiAgentLinks)
     .where(
@@ -2423,7 +2702,137 @@ async function syncEmployeeMembershipState(
         eq(employeeAiAgentLinks.membershipId, membershipId),
       ),
     );
-  if (links.length === 0) return;
+
+  const linkedOwnerCeo =
+    membership.membershipRole === "owner"
+      ? await findCompanyCeoAgent(db, companyId)
+      : null;
+
+  if (linkedOwnerCeo) {
+    const now = new Date();
+    const hasCeoLink = links.some((link) => link.agentId === linkedOwnerCeo.id);
+
+    await db
+      .update(employeeAiAgentLinks)
+      .set({ isPrimary: false, updatedAt: now })
+      .where(
+        and(
+          eq(employeeAiAgentLinks.companyId, companyId),
+          eq(employeeAiAgentLinks.membershipId, membershipId),
+          ne(employeeAiAgentLinks.agentId, linkedOwnerCeo.id),
+        ),
+      );
+
+    if (hasCeoLink) {
+      await db
+        .update(employeeAiAgentLinks)
+        .set({ isPrimary: true, updatedAt: now })
+        .where(
+          and(
+            eq(employeeAiAgentLinks.companyId, companyId),
+            eq(employeeAiAgentLinks.membershipId, membershipId),
+            eq(employeeAiAgentLinks.agentId, linkedOwnerCeo.id),
+          ),
+        );
+    } else {
+      await db.insert(employeeAiAgentLinks).values({
+        companyId,
+        membershipId,
+        agentId: linkedOwnerCeo.id,
+        relationType: "assistant",
+        isPrimary: true,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    await db
+      .update(employeeProfiles)
+      .set({
+        metadata: {
+          ...metadata,
+          personalAgentId: linkedOwnerCeo.id,
+        },
+        updatedAt: now,
+      })
+      .where(eq(employeeProfiles.id, profile.id));
+
+    links = [{ agentId: linkedOwnerCeo.id }];
+  } else if (links.length === 0) {
+    let linkedAgentId: string | null = null;
+
+    if (metadata.personalAgentId) {
+      const existingAgent = await agents.getById(metadata.personalAgentId);
+      if (existingAgent?.companyId === companyId) {
+        linkedAgentId = existingAgent.id;
+      }
+    }
+
+    if (!linkedAgentId) {
+      const managerMetadata = metadata.manager;
+      const resolvedManager =
+        managerMetadata &&
+        ((managerMetadata.type === "agent" && managerMetadata.agentId) ||
+          (managerMetadata.type === "employee" && managerMetadata.membershipId))
+          ? await resolveEmployeeManager(db, agents, companyId, managerMetadata)
+          : null;
+      const employeeRole = nonEmptyTrimmedString(profile.role) ?? "Employee";
+      const createdAgent = await agents.create(companyId, {
+        name: buildEmployeeAssistantNameFromProfile({
+          displayName: profile.displayName,
+          email: profile.email,
+        }),
+        role: "general",
+        title: `${employeeRole} AI Assistant`,
+        icon: null,
+        status: "paused",
+        reportsTo: resolvedManager?.reportsToAgentId ?? null,
+        capabilities: buildEmployeeAssistantCapabilities(employeeRole, profile.department),
+        adapterType: "process",
+        adapterConfig: {},
+        runtimeConfig: {},
+        defaultEnvironmentId: null,
+        budgetMonthlyCents: 0,
+        spentMonthlyCents: 0,
+        pauseReason: "system",
+        pausedAt: new Date(),
+        permissions: {},
+        lastHeartbeatAt: null,
+        metadata: {
+          employeeAssistant: true,
+          approvalRequired: true,
+          source: "employee_profile",
+          invitedEmail: nonEmptyTrimmedString(profile.email),
+        },
+      });
+      linkedAgentId = createdAgent.id;
+    }
+
+    await access.ensureMembership(companyId, "agent", linkedAgentId, "member", "active");
+
+    const now = new Date();
+    await db.insert(employeeAiAgentLinks).values({
+      companyId,
+      membershipId,
+      agentId: linkedAgentId,
+      relationType: "assistant",
+      isPrimary: true,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await db
+      .update(employeeProfiles)
+      .set({
+        metadata: {
+          ...metadata,
+          personalAgentId: linkedAgentId,
+        },
+        updatedAt: now,
+      })
+      .where(eq(employeeProfiles.id, profile.id));
+
+    links = [{ agentId: linkedAgentId }];
+  }
 
   const grants =
     membership.status === "active"
@@ -2449,9 +2858,18 @@ async function syncEmployeeMembershipState(
       : [];
 
   for (const link of links) {
-    await access.setPrincipalGrants(companyId, "agent", link.agentId, grants, grantedByUserId);
     const linkedAgent = await agents.getById(link.agentId);
     if (!linkedAgent) continue;
+    if (linkedAgent.role === "ceo") {
+      continue;
+    }
+    if (membership.status === "archived") {
+      if (linkedAgent.status !== "terminated") {
+        await agents.terminate(link.agentId);
+      }
+      continue;
+    }
+    await access.setPrincipalGrants(companyId, "agent", link.agentId, grants, grantedByUserId);
     if (membership.status === "active") {
       if (linkedAgent.status === "paused" && linkedAgent.pauseReason === "system") {
         await agents.resume(link.agentId);
@@ -3799,12 +4217,6 @@ export function accessRoutes(
       ) {
         throw unauthorized("Authenticated user is required");
       }
-      if (
-        requestType === "human" &&
-        actorHasActiveUserMembership(req, companyId)
-      ) {
-        throw conflict("You already belong to this company");
-      }
       if (requestType === "agent" && !req.body.agentName) {
         if (
           !inviteAlreadyAccepted ||
@@ -3903,6 +4315,15 @@ export function accessRoutes(
               invite.defaultsPayload as Record<string, unknown> | null,
             )
           : null;
+      const existingUserMembership =
+        requestType === "human" && req.actor.userId
+          ? await findUserCompanyMembership(db, companyId, req.actor.userId)
+          : null;
+      const shouldReconcileExistingMemberInvite =
+        requestType === "human" &&
+        Boolean(existingUserMembership) &&
+        Boolean(req.actor.userId) &&
+        Boolean(employeeInviteDefaults?.employeeMembershipId);
       if (
         requestType === "human" &&
         actorEmail &&
@@ -3910,6 +4331,13 @@ export function accessRoutes(
         actorEmail.trim().toLowerCase() !== employeeInviteDefaults.invitedEmail.trim().toLowerCase()
       ) {
         throw conflict("This invite is for a different email address");
+      }
+      if (
+        requestType === "human" &&
+        actorHasActiveUserMembership(req, companyId) &&
+        !shouldReconcileExistingMemberInvite
+      ) {
+        throw conflict("You already belong to this company");
       }
       const existingHumanJoinRequest =
         requestType === "human"
@@ -3930,7 +4358,19 @@ export function accessRoutes(
               }
             )
           : null;
-      let created = !inviteAlreadyAccepted
+      let created = shouldReconcileExistingMemberInvite
+        ? await reconcileEmployeeInviteForExistingMember({
+            db,
+            access,
+            agents,
+            req,
+            invite,
+            companyId,
+            actorUserId: req.actor.userId!,
+            actorEmail,
+            employeeMembershipId: employeeInviteDefaults!.employeeMembershipId!,
+          })
+        : !inviteAlreadyAccepted
         ? existingHumanJoinRequest
           ? await db.transaction(async (tx) => {
               await tx
@@ -4436,30 +4876,38 @@ export function accessRoutes(
       if (existingEmployee) throw conflict("An employee with that email already exists");
 
       const manager = await resolveEmployeeManager(db, agents, companyId, req.body.manager);
-      const personalAgent = await agents.create(companyId, {
-        name: buildEmployeeAssistantName(req.body.displayName),
-        role: "general",
-        title: `${req.body.role} AI Assistant`,
-        icon: null,
-        status: "paused",
-        reportsTo: manager.reportsToAgentId,
-        capabilities: buildEmployeeAssistantCapabilities(req.body.role, req.body.department),
-        adapterType: "process",
-        adapterConfig: {},
-        runtimeConfig: {},
-        defaultEnvironmentId: null,
-        budgetMonthlyCents: 0,
-        spentMonthlyCents: 0,
-        pauseReason: "system",
-        pausedAt: new Date(),
-        permissions: {},
-        lastHeartbeatAt: null,
-        metadata: {
-          employeeAssistant: true,
-          approvalRequired: true,
-          source: "employee_profile",
-        },
-      });
+      const ownerCeoAgent =
+        req.body.workspaceRole === "owner"
+          ? await findCompanyCeoAgent(db, companyId)
+          : null;
+      let createdPersonalAgent = false;
+      const personalAgent = ownerCeoAgent
+        ? ownerCeoAgent
+        : await agents.create(companyId, {
+            name: buildEmployeeAssistantName(req.body.displayName),
+            role: "general",
+            title: `${req.body.role} AI Assistant`,
+            icon: null,
+            status: "paused",
+            reportsTo: manager.reportsToAgentId,
+            capabilities: buildEmployeeAssistantCapabilities(req.body.role, req.body.department),
+            adapterType: "process",
+            adapterConfig: {},
+            runtimeConfig: {},
+            defaultEnvironmentId: null,
+            budgetMonthlyCents: 0,
+            spentMonthlyCents: 0,
+            pauseReason: "system",
+            pausedAt: new Date(),
+            permissions: {},
+            lastHeartbeatAt: null,
+            metadata: {
+              employeeAssistant: true,
+              approvalRequired: true,
+              source: "employee_profile",
+            },
+          });
+      createdPersonalAgent = !ownerCeoAgent;
 
       try {
         await access.ensureMembership(companyId, "agent", personalAgent.id, "member", "active");
@@ -4665,7 +5113,9 @@ export function accessRoutes(
         if (!employee) throw notFound("Employee not found");
         res.status(201).json({ employee });
       } catch (error) {
-        await agents.remove(personalAgent.id);
+          if (createdPersonalAgent) {
+            await agents.remove(personalAgent.id);
+          }
         throw error;
       }
     },
@@ -5427,11 +5877,31 @@ export function accessRoutes(
     async (req, res) => {
       await assertInstanceAdmin(req);
       const userId = req.params.userId as string;
-      await access.setUserCompanyAccess(
+      const membershipsBefore = await access.listUserCompanyAccess(userId);
+      const membershipsAfter = await access.setUserCompanyAccess(
         userId,
         req.body.companyIds ?? [],
         { actorUserId: req.actor.userId ?? null },
       );
+      const previousByMembershipId = new Map(
+        membershipsBefore.map((membership) => [membership.id, membership]),
+      );
+      const archivedMemberships = membershipsAfter
+        .filter((membership) => {
+          if (membership.status !== "archived") return false;
+          const previous = previousByMembershipId.get(membership.id);
+          return previous?.status !== "archived";
+        });
+      for (const membership of archivedMemberships) {
+        await syncEmployeeMembershipState(
+          db,
+          access,
+          agents,
+          membership.companyId,
+          membership.id,
+          req.actor.userId ?? null,
+        );
+      }
       res.json(await loadUserCompanyAccessResponse(db, access, userId));
     }
   );

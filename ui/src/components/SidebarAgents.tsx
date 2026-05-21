@@ -13,6 +13,7 @@ import { useCompany } from "../context/CompanyContext";
 import { useDialogActions } from "../context/DialogContext";
 import { useSidebar } from "../context/SidebarContext";
 import { useToastActions } from "../context/ToastContext";
+import { accessApi } from "../api/access";
 import { agentsApi } from "../api/agents";
 import { authApi } from "../api/auth";
 import { heartbeatsApi } from "../api/heartbeats";
@@ -40,6 +41,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { Agent } from "@paperclipai/shared";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
 const AGENT_SORT_CHOICES: SidebarSectionRadioChoice[] = [
   { value: "top", label: "Top" },
@@ -74,6 +76,10 @@ function sortAgents(agents: Agent[], sortMode: AgentSidebarSortMode): Agent[] {
       : left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
   });
   return sorted;
+}
+
+function deriveUserLabel(user: { name: string | null; email: string | null }, principalId: string) {
+  return user.name?.trim() || user.email?.trim() || principalId;
 }
 
 function SidebarAgentItem({
@@ -192,6 +198,29 @@ function SidebarAgentItem({
   );
 }
 
+function UserSidebarItem({
+  principalId,
+  label,
+  image,
+}: {
+  principalId: string;
+  label: string;
+  image: string | null;
+}) {
+  return (
+    <Link
+      to={`/u/${principalId}`}
+      className="flex items-center gap-2.5 px-3 py-1.5 text-[13px] font-medium text-foreground/80 transition-colors hover:bg-accent/50 hover:text-foreground"
+    >
+      <Avatar className="size-5 shrink-0">
+        {image ? <AvatarImage src={image} alt={label} /> : null}
+        <AvatarFallback className="text-[10px] font-semibold">{label.slice(0, 2).toUpperCase()}</AvatarFallback>
+      </Avatar>
+      <span className="truncate">{label}</span>
+    </Link>
+  );
+}
+
 export function SidebarAgents() {
   const [open, setOpen] = useState(true);
   const [pendingAgentIds, setPendingAgentIds] = useState<Set<string>>(() => new Set());
@@ -233,6 +262,21 @@ export function SidebarAgents() {
     );
     return filtered;
   }, [agents]);
+  const { data: companyUserDirectory } = useQuery({
+    queryKey: queryKeys.access.companyUserDirectory(selectedCompanyId ?? ""),
+    queryFn: () => accessApi.listUserDirectory(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
+  const visibleUsers = useMemo(() => {
+    return (companyUserDirectory?.users ?? [])
+      .map((entry) => ({
+        principalId: entry.principalId,
+        label: deriveUserLabel(entry.user ?? { name: null, email: null }, entry.principalId),
+        image: entry.user?.image ?? null,
+      }))
+      .filter((entry) => entry.label.trim().length > 0)
+      .sort((left, right) => left.label.localeCompare(right.label, undefined, { sensitivity: "base" }));
+  }, [companyUserDirectory?.users]);
   const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
   const sortModeStorageKey = useMemo(() => {
     if (!selectedCompanyId) return null;
@@ -344,42 +388,59 @@ export function SidebarAgents() {
   });
 
   return (
-    <SidebarSection
-      label="Agents"
-      collapsible={{ open, onOpenChange: setOpen }}
-      headerAction={{
-        ariaLabel: "New agent",
-        icon: Plus,
-        onClick: openNewAgent,
-      }}
-      menu={{
-        ariaLabel: "Agents section actions",
-        actions: [
-          { type: "item", label: "Browse agents", icon: Users, href: "/agents/all" },
-          { type: "separator" },
-        ],
-        radioLabel: "Agent sort",
-        radioChoices: AGENT_SORT_CHOICES,
-        radioValue: sortMode,
-        onRadioValueChange: persistSortMode,
-      }}
-    >
-      {sortedAgents.map((agent: Agent) => {
-        const runCount = liveCountByAgent.get(agent.id) ?? 0;
-        return (
-          <SidebarAgentItem
-            key={agent.id}
-            activeAgentId={activeAgentId}
-            activeTab={activeTab}
-            agent={agent}
-            disabled={pendingAgentIds.has(agent.id)}
-            isMobile={isMobile}
-            onPauseResume={(targetAgent, action) => pauseResumeAgent.mutate({ agent: targetAgent, action })}
-            runCount={runCount}
-            setSidebarOpen={setSidebarOpen}
-          />
-        );
-      })}
-    </SidebarSection>
+    <>
+      <SidebarSection
+        label="Agents"
+        collapsible={{ open, onOpenChange: setOpen }}
+        headerAction={{
+          ariaLabel: "New agent",
+          icon: Plus,
+          onClick: openNewAgent,
+        }}
+        menu={{
+          ariaLabel: "Agents section actions",
+          actions: [
+            { type: "item", label: "Browse agents", icon: Users, href: "/agents/all" },
+            { type: "separator" },
+          ],
+          radioLabel: "Agent sort",
+          radioChoices: AGENT_SORT_CHOICES,
+          radioValue: sortMode,
+          onRadioValueChange: persistSortMode,
+        }}
+      >
+        {sortedAgents.map((agent: Agent) => {
+          const runCount = liveCountByAgent.get(agent.id) ?? 0;
+          return (
+            <SidebarAgentItem
+              key={agent.id}
+              activeAgentId={activeAgentId}
+              activeTab={activeTab}
+              agent={agent}
+              disabled={pendingAgentIds.has(agent.id)}
+              isMobile={isMobile}
+              onPauseResume={(targetAgent, action) => pauseResumeAgent.mutate({ agent: targetAgent, action })}
+              runCount={runCount}
+              setSidebarOpen={setSidebarOpen}
+            />
+          );
+        })}
+      </SidebarSection>
+
+      <SidebarSection label="Users">
+        {visibleUsers.length === 0 ? (
+          <div className="px-3 py-2 text-xs text-muted-foreground">No users found</div>
+        ) : (
+          visibleUsers.map((user) => (
+            <UserSidebarItem
+              key={user.principalId}
+              principalId={user.principalId}
+              label={user.label}
+              image={user.image}
+            />
+          ))
+        )}
+      </SidebarSection>
+    </>
   );
 }
