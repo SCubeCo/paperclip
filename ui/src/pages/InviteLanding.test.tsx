@@ -370,6 +370,8 @@ describe("InviteLandingPage", () => {
     await flushReact();
     await flushReact();
     await flushReact();
+    await flushReact();
+    await flushReact();
 
     expect(completePasswordAuthMock).toHaveBeenCalledWith({
       email: "jane@example.com",
@@ -502,7 +504,7 @@ describe("InviteLandingPage", () => {
     });
   });
 
-  it("redirects straight to the company after sign-in when the user already has access", async () => {
+  it("still accepts the invite after sign-in when the user already has company access", async () => {
     getSessionMock.mockResolvedValueOnce(null);
     getSessionMock.mockResolvedValue({
       session: { id: "session-1", userId: "user-1" },
@@ -514,6 +516,12 @@ describe("InviteLandingPage", () => {
       },
     });
     listCompaniesMock.mockResolvedValue([{ id: "company-1", name: "Acme Robotics" }]);
+    acceptInviteMock.mockResolvedValue({
+      id: "join-1",
+      companyId: "company-1",
+      requestType: "human",
+      status: "approved",
+    });
 
     const root = createRoot(container);
     const queryClient = new QueryClient({
@@ -592,7 +600,7 @@ describe("InviteLandingPage", () => {
       email: "jane@example.com",
       otp: "123456",
     });
-    expect(acceptInviteMock).not.toHaveBeenCalled();
+    expect(acceptInviteMock).toHaveBeenCalledWith("pcp_invite_test", { requestType: "human" });
     expect(setSelectedCompanyIdMock).toHaveBeenCalledWith("company-1", { source: "manual" });
     expect(localStorage.getItem("paperclip:pending-invite-token")).toBeNull();
 
@@ -601,7 +609,95 @@ describe("InviteLandingPage", () => {
     });
   });
 
-  it("continues invite acceptance after OTP when company list refresh fails", async () => {
+  it("auto-accepts for an already signed-in company member instead of redirecting before invite processing", async () => {
+    getSessionMock.mockResolvedValue({
+      session: { id: "session-1", userId: "user-1" },
+      user: {
+        id: "user-1",
+        name: "Jane Example",
+        email: "jane@example.com",
+        image: null,
+      },
+    });
+    listCompaniesMock.mockResolvedValue([{ id: "company-1", name: "Acme Robotics" }]);
+    acceptInviteMock.mockResolvedValue({
+      id: "join-1",
+      companyId: "company-1",
+      requestType: "human",
+      status: "approved",
+    });
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/invite/pcp_invite_test"]}>
+          <QueryClientProvider client={queryClient}>
+            <Routes>
+              <Route path="/invite/:token" element={<InviteLandingPage />} />
+            </Routes>
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(acceptInviteMock).toHaveBeenCalledWith("pcp_invite_test", { requestType: "human" });
+    expect(setSelectedCompanyIdMock).toHaveBeenCalledWith("company-1", { source: "manual" });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("redirects existing members into the company when invite acceptance reports they already belong", async () => {
+    getSessionMock.mockResolvedValue({
+      session: { id: "session-1", userId: "user-1" },
+      user: {
+        id: "user-1",
+        name: "Jane Example",
+        email: "jane@example.com",
+        image: null,
+      },
+    });
+    listCompaniesMock.mockResolvedValue([{ id: "company-1", name: "Acme Robotics" }]);
+    acceptInviteMock.mockRejectedValue(new Error("You already belong to this company"));
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/invite/pcp_invite_test"]}>
+          <QueryClientProvider client={queryClient}>
+            <Routes>
+              <Route path="/invite/:token" element={<InviteLandingPage />} />
+            </Routes>
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    expect(acceptInviteMock).toHaveBeenCalledWith("pcp_invite_test", { requestType: "human" });
+    expect(setSelectedCompanyIdMock).toHaveBeenCalledWith("company-1", { source: "manual" });
+    expect(container.textContent).not.toContain("You already belong to this company");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("keeps the invite flow usable after OTP when company list refresh fails", async () => {
     getSessionMock.mockResolvedValueOnce(null);
     getSessionMock.mockResolvedValue({
       session: { id: "session-1", userId: "user-1" },
@@ -687,8 +783,8 @@ describe("InviteLandingPage", () => {
       email: "jane@example.com",
       otp: "123456",
     });
-    expect(acceptInviteMock).toHaveBeenCalledWith("pcp_invite_test", { requestType: "human" });
-    expect(setSelectedCompanyIdMock).toHaveBeenCalledWith("company-1", { source: "manual" });
+    expect(container.textContent).toContain("Checking your access...");
+    expect(container.textContent).not.toContain("Invite not available");
 
     await act(async () => {
       root.unmount();

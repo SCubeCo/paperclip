@@ -145,6 +145,10 @@ function normalizeCompaniesPayload(value: unknown): Company[] {
   return [];
 }
 
+function isAlreadyMemberError(error: unknown) {
+  return error instanceof Error && error.message.trim() === "You already belong to this company";
+}
+
 function InviteCompanyLogo({
   companyDisplayName,
   companyLogoUrl,
@@ -277,6 +281,27 @@ export function InviteLandingPage() {
     [companiesQuery.data],
   );
 
+  async function redirectToCompany(companyId: string) {
+    let knownCompanies = companyList;
+    if (knownCompanies.length === 0) {
+      try {
+        const companiesResult = await queryClient.fetchQuery({
+          queryKey: queryKeys.companies.all,
+          queryFn: () => companiesApi.list(),
+          retry: 1,
+        });
+        knownCompanies = normalizeCompaniesPayload(companiesResult);
+      } catch {
+        knownCompanies = [];
+      }
+    }
+
+    const company = knownCompanies.find((entry) => entry.id === companyId);
+    setSelectedCompanyId(companyId, { source: "manual" });
+    clearPendingInviteToken(token);
+    window.location.href = company?.issuePrefix ? `/${company.issuePrefix}/dashboard` : "/";
+  }
+
   useEffect(() => {
     if (token) rememberPendingInviteToken(token);
   }, [token]);
@@ -287,10 +312,11 @@ export function InviteLandingPage() {
 
   useEffect(() => {
     if (companyList.length === 0 || !inviteQuery.data?.companyId) return;
+    const joinRequestStatus = inviteQuery.data.joinRequestStatus ?? null;
     const isMember = companyList.some(
       (c) => c.id === inviteQuery.data!.companyId
     );
-    if (isMember) {
+    if (isMember && joinRequestStatus === "approved") {
       // Ensure the selected company is set before navigating
       const company = companyList.find((c) => c.id === inviteQuery.data.companyId);
       setSelectedCompanyId(inviteQuery.data.companyId);
@@ -334,7 +360,6 @@ export function InviteLandingPage() {
     invite?.inviteType !== "bootstrap_ceo" &&
     !inviteJoinRequestStatus &&
     !isCheckingExistingMembership &&
-    !isCurrentMember &&
     !result &&
     error === null;
   const sessionLabel =
@@ -350,12 +375,6 @@ export function InviteLandingPage() {
   const acceptMutation = useMutation({
     mutationFn: async () => {
       if (!invite) throw new Error("Invite not found");
-      if (isCheckingExistingMembership) {
-        throw new Error("Checking your company access. Try again in a moment.");
-      }
-      if (isCurrentMember) {
-        throw new Error("This account already belongs to the company.");
-      }
       if (invite.inviteType === "bootstrap_ceo" || invite.allowedJoinTypes !== "agent") {
         return accessApi.acceptInvite(token, { requestType: "human" });
       }
@@ -408,6 +427,10 @@ export function InviteLandingPage() {
       }
     },
     onError: (err) => {
+      if (invite?.companyId && isAlreadyMemberError(err)) {
+        void redirectToCompany(invite.companyId);
+        return;
+      }
       setError(err instanceof Error ? err.message : "Failed to accept invite");
     },
   });
@@ -475,20 +498,18 @@ export function InviteLandingPage() {
         companies = [];
       }
 
-      if (invite?.companyId && companies.some((company) => company.id === invite.companyId)) {
-        clearPendingInviteToken(token);
-        const company = companies.find((c) => c.id === invite.companyId);
-        setSelectedCompanyId(invite.companyId, { source: "manual" });
-        // Use full page reload to ensure session cookie is processed
-        if (company?.issuePrefix) {
-          window.location.href = `/${company.issuePrefix}/dashboard`;
-        } else {
-          window.location.href = "/";
-        }
+      if (!invite) {
         return;
       }
 
-      if (!invite || invite.inviteType !== "bootstrap_ceo") {
+      if (invite.inviteType !== "bootstrap_ceo") {
+        if (companies.length === 0) {
+          try {
+            await acceptMutation.mutateAsync();
+          } catch (err) {
+            console.error("Failed to continue invite acceptance after OTP auth:", err);
+          }
+        }
         return;
       }
 
@@ -960,7 +981,7 @@ export function InviteLandingPage() {
                 ) : (
                   <Button
                     className="w-full rounded-none"
-                    disabled={acceptMutation.isPending || isCurrentMember}
+                    disabled={acceptMutation.isPending}
                     onClick={() => acceptMutation.mutate()}
                   >
                     {acceptMutation.isPending ? "Working..." : joinButtonLabel}

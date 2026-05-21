@@ -1,7 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Camera, LoaderCircle, Save, Trash2, UserRoundPen } from "lucide-react";
+import { Bot, Camera, LoaderCircle, Save, Trash2, UserRoundPen } from "lucide-react";
 import type { AuthSession, CurrentUserProfile, UpdateCurrentUserProfile } from "@paperclipai/shared";
+import { accessApi } from "@/api/access";
 import { authApi } from "@/api/auth";
 import { assetsApi } from "@/api/assets";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -30,6 +31,12 @@ export function ProfileSettings() {
   const sessionQuery = useQuery({
     queryKey: queryKeys.auth.session,
     queryFn: () => authApi.getSession(),
+    retry: false,
+  });
+  const employeesQuery = useQuery({
+    queryKey: queryKeys.access.employees(selectedCompanyId ?? ""),
+    queryFn: () => accessApi.listEmployees(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
     retry: false,
   });
 
@@ -136,6 +143,9 @@ export function ProfileSettings() {
   const uploadHint = selectedCompany
     ? `Stored in Paperclip file storage for ${selectedCompany.name}.`
     : "Select a company to upload an avatar into Paperclip storage.";
+  const currentEmployee =
+    employeesQuery.data?.employees.find((employee) => employee.memberUser?.id === sessionQuery.data?.user.id) ?? null;
+  const linkedAgent = currentEmployee?.personalAgent ?? null;
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -215,6 +225,44 @@ export function ProfileSettings() {
 
               <div className="min-w-0 flex-1 space-y-2 pb-1">
                 <div>
+
+                {selectedCompany ? (
+                  <div className="rounded-[24px] border border-border/70 bg-card p-5 shadow-sm">
+                    <div className="flex items-start gap-3">
+                      <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-full border border-border bg-muted/40">
+                        <Bot className="h-4 w-4 text-muted-foreground" />
+                      </div>
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h2 className="text-base font-semibold">Linked agent</h2>
+                          <span className="rounded-full border border-border px-2 py-0.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+                            {selectedCompany.name}
+                          </span>
+                        </div>
+                        {employeesQuery.isLoading ? (
+                          <p className="text-sm text-muted-foreground">Checking your company profile link...</p>
+                        ) : linkedAgent ? (
+                          <>
+                            <p className="text-sm text-foreground">
+                              Your company profile is linked to <span className="font-medium">{linkedAgent.name}</span>.
+                            </p>
+                            <p className="text-sm text-muted-foreground">
+                              Role: {linkedAgent.role} · Status: {linkedAgent.status ?? "unknown"}
+                            </p>
+                          </>
+                        ) : currentEmployee ? (
+                          <p className="text-sm text-muted-foreground">
+                            Your company profile exists, but no linked agent is assigned yet.
+                          </p>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            You do not currently have an employee profile in this company.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
                   <h2 className="truncate text-2xl font-semibold text-foreground">{currentName}</h2>
                   <p className="truncate text-sm text-muted-foreground">{sessionQuery.data.user.email ?? "No email"}</p>
                 </div>
