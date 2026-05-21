@@ -129,6 +129,7 @@ vi.mock("../lib/assignees", () => ({
     assigneeUserId?: string;
   }) => assigneeAgentId ? `agent:${assigneeAgentId}` : assigneeUserId ? `user:${assigneeUserId}` : "",
   currentUserAssigneeOption: () => [],
+  formatAssigneeUserLabel: (userId: string) => userId,
   parseAssigneeValue: (value: string) => ({
     assigneeAgentId: value.startsWith("agent:") ? value.slice("agent:".length) : null,
     assigneeUserId: value.startsWith("user:") ? value.slice("user:".length) : null,
@@ -626,7 +627,142 @@ describe("NewIssueDialog", () => {
     act(() => root.unmount());
   });
 
-  it("submits the parent assignee when a sub-issue opens with inherited defaults", async () => {
+  it("creates one issue per selected user and shows a batch success toast", async () => {
+    localStorage.setItem(
+      "paperclip:issue-draft",
+      JSON.stringify({
+        title: "Multi-user issue",
+        description: "Created from draft",
+        status: "todo",
+        priority: "medium",
+        assigneeValue: "",
+        assigneeUserIds: ["user-2", "user-3"],
+        reviewerValue: "",
+        approverValue: "",
+        projectId: "",
+        projectWorkspaceId: "",
+        assigneeModelLane: "primary",
+        assigneeModelOverride: "",
+        assigneeThinkingEffort: "",
+        assigneeChrome: false,
+        executionWorkspaceMode: "shared_workspace",
+        selectedExecutionWorkspaceId: "",
+        workMode: "standard",
+      }),
+    );
+
+    mockIssuesApi.create
+      .mockResolvedValueOnce({ id: "issue-21", companyId: "company-1", identifier: "PAP-21" })
+      .mockResolvedValueOnce({ id: "issue-22", companyId: "company-1", identifier: "PAP-22" });
+
+    const { root } = renderDialog(container);
+    await flush();
+
+    const submitButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create Issue"));
+    expect(submitButton).not.toBeUndefined();
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(mockIssuesApi.create).toHaveBeenCalledTimes(2);
+    expect(mockIssuesApi.create).toHaveBeenNthCalledWith(
+      1,
+      "company-1",
+      expect.objectContaining({
+        title: "Multi-user issue",
+        assigneeUserId: "user-2",
+      }),
+    );
+    expect(mockIssuesApi.create).toHaveBeenNthCalledWith(
+      2,
+      "company-1",
+      expect.objectContaining({
+        title: "Multi-user issue",
+        assigneeUserId: "user-3",
+      }),
+    );
+
+    const firstPayload = mockIssuesApi.create.mock.calls[0]?.[1] as Record<string, unknown>;
+    const secondPayload = mockIssuesApi.create.mock.calls[1]?.[1] as Record<string, unknown>;
+    expect(firstPayload.assigneeAgentId).toBeUndefined();
+    expect(secondPayload.assigneeAgentId).toBeUndefined();
+
+    expect(toastState.pushToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Created 2 issues",
+        body: "One issue was created per selected user.",
+        tone: "success",
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it("creates one issue per selected assignee when one agent and multiple users are selected", async () => {
+    localStorage.setItem(
+      "paperclip:issue-draft",
+      JSON.stringify({
+        title: "Mixed assignees issue",
+        description: "Created from draft",
+        status: "todo",
+        priority: "medium",
+        assigneeValue: "",
+        assigneeAgentId: "agent-7",
+        assigneeUserIds: ["user-2", "user-3"],
+        reviewerValue: "",
+        approverValue: "",
+        projectId: "",
+        projectWorkspaceId: "",
+        assigneeModelLane: "primary",
+        assigneeModelOverride: "",
+        assigneeThinkingEffort: "",
+        assigneeChrome: false,
+        executionWorkspaceMode: "shared_workspace",
+        selectedExecutionWorkspaceId: "",
+        workMode: "standard",
+      }),
+    );
+
+    mockIssuesApi.create
+      .mockResolvedValueOnce({ id: "issue-31", companyId: "company-1", identifier: "PAP-31" })
+      .mockResolvedValueOnce({ id: "issue-32", companyId: "company-1", identifier: "PAP-32" })
+      .mockResolvedValueOnce({ id: "issue-33", companyId: "company-1", identifier: "PAP-33" });
+
+    const { root } = renderDialog(container);
+    await flush();
+
+    const submitButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Create Issue"));
+    expect(submitButton).not.toBeUndefined();
+
+    await act(async () => {
+      submitButton!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(mockIssuesApi.create).toHaveBeenCalledTimes(3);
+
+    const payloads = mockIssuesApi.create.mock.calls.map((call) => call[1] as Record<string, unknown>);
+    const userAssignees = payloads.map((payload) => payload.assigneeUserId).filter(Boolean);
+    const agentAssignees = payloads.map((payload) => payload.assigneeAgentId).filter(Boolean);
+    expect(userAssignees).toEqual(["user-2", "user-3"]);
+    expect(agentAssignees).toEqual(["agent-7"]);
+
+    expect(toastState.pushToast).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Created 3 issues",
+        body: "One issue was created per selected assignee.",
+        tone: "success",
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it("does not submit agent assignees when opening a sub-issue from inherited defaults", async () => {
     dialogState.newIssueDefaults = {
       parentId: "issue-1",
       parentIdentifier: "PAP-1",
@@ -656,9 +792,11 @@ describe("NewIssueDialog", () => {
         parentId: "issue-1",
         goalId: "goal-1",
         projectId: "project-1",
-        assigneeAgentId: "agent-1",
       }),
     );
+
+    const submittedPayload = mockIssuesApi.create.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(submittedPayload.assigneeAgentId).toBeUndefined();
 
     act(() => root.unmount());
   });

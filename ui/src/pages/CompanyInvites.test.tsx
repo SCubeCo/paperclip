@@ -9,7 +9,7 @@ import { CompanyInvites } from "./CompanyInvites";
 import { queryKeys } from "@/lib/queryKeys";
 
 const listInvitesMock = vi.hoisted(() => vi.fn());
-const listAgentsMock = vi.hoisted(() => vi.fn());
+const listEmployeesMock = vi.hoisted(() => vi.fn());
 const createCompanyInviteMock = vi.hoisted(() => vi.fn());
 const createEmployeeMock = vi.hoisted(() => vi.fn());
 const revokeInviteMock = vi.hoisted(() => vi.fn());
@@ -20,17 +20,12 @@ const clipboardWriteTextMock = vi.hoisted(() => vi.fn());
 vi.mock("@/api/access", () => ({
   accessApi: {
     listInvites: (companyId: string, options?: unknown) => listInvitesMock(companyId, options),
+    listEmployees: (companyId: string) => listEmployeesMock(companyId),
     createCompanyInvite: (companyId: string, input: unknown) =>
       createCompanyInviteMock(companyId, input),
     createEmployee: (companyId: string, input: unknown) =>
       createEmployeeMock(companyId, input),
     revokeInvite: (inviteId: string) => revokeInviteMock(inviteId),
-  },
-}));
-
-vi.mock("@/api/agents", () => ({
-  agentsApi: {
-    list: (companyId: string) => listAgentsMock(companyId),
   },
 }));
 
@@ -117,13 +112,44 @@ describe("CompanyInvites", () => {
       allowedJoinTypes: "human",
     });
 
-    listAgentsMock.mockResolvedValue([
-      {
-        id: "agent-1",
-        name: "CEO",
-        role: "ceo",
+    listEmployeesMock.mockResolvedValue({
+      employees: [
+        {
+          id: "employee-1",
+          companyId: "company-1",
+          membershipId: "member-1",
+          membershipStatus: "active",
+          workforceStatus: "active",
+          workspaceRole: "owner",
+          displayName: "Venkatesan",
+          email: "venkatesan@example.com",
+          role: "",
+          department: null,
+          experienceLevel: "lead",
+          availabilityStatus: "available",
+          skills: [],
+          assignedProjects: [],
+          manager: null,
+          invitation: null,
+          personalAgent: null,
+          memberUser: null,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      owners: [
+        {
+          membershipId: "member-1",
+          displayName: "Venkatesan",
+          status: "active",
+        },
+      ],
+      access: {
+        canCreateEmployees: true,
+        canInviteUsers: true,
+        canManageMembers: true,
       },
-    ]);
+    });
 
     createEmployeeMock.mockResolvedValue({
       employee: {
@@ -291,9 +317,10 @@ describe("CompanyInvites", () => {
     await flushReact();
     await flushReact();
 
-    expect(listAgentsMock).toHaveBeenCalledWith("company-1");
+    expect(listEmployeesMock).toHaveBeenCalledWith("company-1");
     expect(container.textContent).toContain("Assistant setup");
     expect(container.textContent).toContain("Create invite and agent");
+    expect(container.textContent).toContain("Report to");
 
     const nameInput = Array.from(container.querySelectorAll("input")).find(
       (input) => (input as HTMLInputElement).placeholder === "Jordan Lee",
@@ -337,7 +364,7 @@ describe("CompanyInvites", () => {
         experienceSelect.dispatchEvent(new Event("change", { bubbles: true }));
       }
       if (managerSelect) {
-        setNativeInputValue(managerSelect, "agent-1");
+        setNativeInputValue(managerSelect, "member-1");
         managerSelect.dispatchEvent(new Event("change", { bubbles: true }));
       }
     });
@@ -360,7 +387,7 @@ describe("CompanyInvites", () => {
       role: "Product designer",
       department: "Design",
       experienceLevel: "senior",
-      manager: { type: "agent", agentId: "agent-1" },
+      manager: { type: "employee", membershipId: "member-1" },
     });
     expect(clipboardWriteTextMock).toHaveBeenCalledWith("https://paperclip.local/invite/employee-token");
     expect(container.textContent).toContain("https://paperclip.local/invite/employee-token");

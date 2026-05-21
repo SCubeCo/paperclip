@@ -7,8 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OrgChart } from "./OrgChart";
 
 const navigateMock = vi.fn();
-const orgMock = vi.fn();
-const listMock = vi.fn();
+const listEmployeesMock = vi.fn();
 
 vi.mock("@/lib/router", () => ({
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
@@ -23,86 +22,59 @@ vi.mock("../context/BreadcrumbContext", () => ({
   useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }),
 }));
 
-vi.mock("../api/agents", () => ({
-  agentsApi: {
-    org: () => orgMock(),
-    list: () => listMock(),
+vi.mock("../api/access", () => ({
+  accessApi: {
+    listEmployees: () => listEmployeesMock(),
   },
-}));
-
-vi.mock("../components/AgentIconPicker", () => ({
-  AgentIcon: () => <span data-testid="agent-icon" />,
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-const orgTree = [
+const employees = [
   {
-    id: "agent-1",
-    name: "CEO",
-    role: "ceo",
-    status: "active",
-    reports: [
-      {
-        id: "agent-2",
-        name: "Engineer",
-        role: "engineer",
-        status: "active",
-        reports: [],
-      },
-    ],
-  },
-];
-
-const agents = [
-  {
-    id: "agent-1",
+    id: "employee-1",
     companyId: "company-1",
-    name: "CEO",
-    role: "ceo",
-    title: null,
-    status: "active",
-    reportsTo: null,
-    capabilities: null,
-    adapterType: "codex_local",
-    adapterConfig: {},
-    contextMode: "thin",
-    budgetMonthlyCents: 0,
-    spentMonthlyCents: 0,
-    lastHeartbeatAt: null,
-    icon: "briefcase",
-    metadata: null,
-    createdAt: new Date("2026-04-01T00:00:00.000Z"),
-    updatedAt: new Date("2026-04-01T00:00:00.000Z"),
-    urlKey: "ceo",
-    pauseReason: null,
-    pausedAt: null,
-    permissions: null,
+    membershipId: "member-1",
+    membershipStatus: "active",
+    workforceStatus: "active",
+    workspaceRole: "owner",
+    displayName: "CEO",
+    email: "ceo@example.com",
+    role: "",
+    department: null,
+    experienceLevel: "lead",
+    availabilityStatus: "available",
+    skills: [],
+    assignedProjects: [],
+    manager: { type: "employee", membershipId: "member-2", displayName: "Engineer" },
+    invitation: null,
+    personalAgent: null,
+    memberUser: null,
+    createdAt: "2026-04-01T00:00:00.000Z",
+    updatedAt: "2026-04-01T00:00:00.000Z",
   },
   {
-    id: "agent-2",
+    id: "employee-2",
     companyId: "company-1",
-    name: "Engineer",
-    role: "engineer",
-    title: null,
-    status: "active",
-    reportsTo: "agent-1",
-    capabilities: null,
-    adapterType: "codex_local",
-    adapterConfig: {},
-    contextMode: "thin",
-    budgetMonthlyCents: 0,
-    spentMonthlyCents: 0,
-    lastHeartbeatAt: null,
-    icon: "code",
-    metadata: null,
-    createdAt: new Date("2026-04-01T00:00:00.000Z"),
-    updatedAt: new Date("2026-04-01T00:00:00.000Z"),
-    urlKey: "engineer",
-    pauseReason: null,
-    pausedAt: null,
-    permissions: null,
+    membershipId: "member-2",
+    membershipStatus: "active",
+    workforceStatus: "active",
+    workspaceRole: "member",
+    displayName: "Engineer",
+    email: "engineer@example.com",
+    role: "Engineer",
+    department: null,
+    experienceLevel: "mid",
+    availabilityStatus: "available",
+    skills: [],
+    assignedProjects: [],
+    manager: { type: "employee", membershipId: "member-1", displayName: "CEO" },
+    invitation: null,
+    personalAgent: null,
+    memberUser: null,
+    createdAt: "2026-04-01T00:00:00.000Z",
+    updatedAt: "2026-04-01T00:00:00.000Z",
   },
 ];
 
@@ -135,8 +107,17 @@ describe("OrgChart mobile gestures", () => {
     queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
-    orgMock.mockResolvedValue(orgTree);
-    listMock.mockResolvedValue(agents);
+    listEmployeesMock.mockResolvedValue({
+      employees,
+      owners: [
+        {
+          membershipId: "member-1",
+          displayName: "Venkatesan",
+          status: "active",
+        },
+      ],
+      access: { canCreateEmployees: true, canInviteUsers: true, canManageMembers: true },
+    });
 
     Object.defineProperty(HTMLElement.prototype, "clientWidth", {
       configurable: true,
@@ -237,13 +218,15 @@ describe("OrgChart mobile gestures", () => {
     const { viewport } = await renderOrgChart();
     const card = container.querySelector("[data-org-card]") as HTMLDivElement;
 
+    expect(container.textContent).toContain("CEO");
+
     await act(async () => {
       viewport.dispatchEvent(createTouchEvent("touchstart", [{ clientX: 100, clientY: 100 }]));
       viewport.dispatchEvent(createTouchEvent("touchend", []));
       card.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
 
-    expect(navigateMock).toHaveBeenCalledWith("/agents/ceo");
+    expect(navigateMock).toHaveBeenCalledWith("/company/settings/access");
   });
   it("pinch-zooms toward the touch center", async () => {
     const { viewport, layer } = await renderOrgChart();

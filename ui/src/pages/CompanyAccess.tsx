@@ -7,7 +7,7 @@ import {
   type PermissionKey,
 } from "@paperclipai/shared";
 import { ShieldCheck, Trash2, Users } from "lucide-react";
-import { accessApi, type CompanyMember } from "@/api/access";
+import { accessApi, type CompanyMember, type EmployeeRecord } from "@/api/access";
 import { agentsApi } from "@/api/agents";
 import { ApiError } from "@/api/client";
 import { issuesApi } from "@/api/issues";
@@ -67,6 +67,7 @@ export function CompanyAccess() {
   const [reassignmentTarget, setReassignmentTarget] = useState<string>("__unassigned");
   const [draftRole, setDraftRole] = useState<CompanyMember["membershipRole"]>(null);
   const [draftStatus, setDraftStatus] = useState<EditableMemberStatus>("active");
+  const [draftManagerMembershipId, setDraftManagerMembershipId] = useState<string>("");
   const [draftGrants, setDraftGrants] = useState<Set<PermissionKey>>(new Set());
   const [employeeDisplayName, setEmployeeDisplayName] = useState("");
   const [employeeEmail, setEmployeeEmail] = useState("");
@@ -119,11 +120,9 @@ export function CompanyAccess() {
   const createEmployeeMutation = useMutation({
     mutationFn: async () => {
       if (!employeeManagerKey) {
-        throw new Error("Select a manager before creating an employee.");
+        throw new Error("Select who this user reports to before creating an employee.");
       }
-      const manager = employeeManagerKey.startsWith("agent:")
-        ? { type: "agent" as const, agentId: employeeManagerKey.slice("agent:".length) }
-        : { type: "employee" as const, membershipId: employeeManagerKey.slice("employee:".length) };
+      const manager = { type: "employee" as const, membershipId: employeeManagerKey.slice("employee:".length) };
       return accessApi.createEmployee(selectedCompanyId!, {
         displayName: employeeDisplayName.trim(),
         email: employeeEmail.trim(),
@@ -163,10 +162,17 @@ export function CompanyAccess() {
   });
 
   const updateMemberMutation = useMutation({
-    mutationFn: async (input: { memberId: string; membershipRole: CompanyMember["membershipRole"]; status: EditableMemberStatus; grants: PermissionKey[] }) => {
+    mutationFn: async (input: {
+      memberId: string;
+      membershipRole: CompanyMember["membershipRole"];
+      status: EditableMemberStatus;
+      managerMembershipId?: string | null;
+      grants: PermissionKey[];
+    }) => {
       return accessApi.updateMemberAccess(selectedCompanyId!, input.memberId, {
         membershipRole: input.membershipRole,
         status: input.status,
+        ...(input.managerMembershipId !== undefined ? { managerMembershipId: input.managerMembershipId } : {}),
         grants: input.grants.map((permissionKey) => ({ permissionKey })),
       });
     },
@@ -227,24 +233,48 @@ export function CompanyAccess() {
     () => membersQuery.data?.members.find((member) => member.id === editingMemberId) ?? null,
     [editingMemberId, membersQuery.data?.members],
   );
+  const employeesByMembershipId = useMemo(() => {
+    const map = new Map<string, EmployeeRecord>();
+    for (const employee of employeesQuery.data?.employees ?? []) {
+      map.set(employee.membershipId, employee);
+    }
+    return map;
+  }, [employeesQuery.data?.employees]);
+  const members = membersQuery.data?.members ?? [];
+  const editingEmployee = useMemo(
+    () => (editingMember ? employeesByMembershipId.get(editingMember.id) ?? null : null),
+    [editingMember, employeesByMembershipId],
+  );
+  const managerUserOptions = useMemo(
+    () =>
+      members
+        .filter(
+          (member) =>
+            member.principalType === "user" &&
+            member.status !== "archived" &&
+            member.id !== editingMember?.id,
+        )
+        .map((member) => ({
+          id: member.id,
+          label: `${member.user?.name?.trim() || member.user?.email || member.principalId} (${employeeRoleLabel(member, employeesByMembershipId.get(member.id))})`,
+          subtitle: member.user?.email || member.principalId,
+        }))
+        .sort((a, b) => a.label.localeCompare(b.label)),
+    [editingMember?.id, employeesByMembershipId, members],
+  );
   const removingMember = useMemo(
     () => membersQuery.data?.members.find((member) => member.id === removingMemberId) ?? null,
     [removingMemberId, membersQuery.data?.members],
   );
   const managerOptions = useMemo(
-    () => [
-      ...(agentsQuery.data ?? []).map((agent) => ({
-        key: `agent:${agent.id}`,
-        label: `${agent.name} (${agent.role})`,
-      })),
-      ...((employeesQuery.data?.employees ?? [])
-        .filter((employee) => employee.membershipStatus !== "archived")
-        .map((employee) => ({
-          key: `employee:${employee.membershipId}`,
-          label: `${employee.displayName} (${employee.role})`,
-        }))),
-    ],
-    [agentsQuery.data, employeesQuery.data?.employees],
+    () =>
+      members
+        .filter((member) => member.principalType === "user" && member.status !== "archived")
+        .map((member) => ({
+          key: `employee:${member.id}`,
+          label: `${member.user?.name?.trim() || member.user?.email || member.principalId} (${employeeRoleLabel(member, employeesByMembershipId.get(member.id))})`,
+        })),
+    [employeesByMembershipId, members],
   );
 
   const assignedIssuesQuery = useQuery({
@@ -298,8 +328,9 @@ export function CompanyAccess() {
     if (!editingMember) return;
     setDraftRole(editingMember.membershipRole);
     setDraftStatus(isEditableMemberStatus(editingMember.status) ? editingMember.status : "suspended");
+    setDraftManagerMembershipId(editingEmployee?.manager?.type === "employee" ? (editingEmployee.manager.membershipId ?? "") : "");
     setDraftGrants(new Set(editingMember.grants.map((grant) => grant.permissionKey)));
-  }, [editingMember]);
+  }, [editingEmployee, editingMember]);
 
   useEffect(() => {
     if (!removingMember) return;
@@ -324,7 +355,6 @@ export function CompanyAccess() {
     return <div className="text-sm text-destructive">{message}</div>;
   }
 
-  const members = membersQuery.data?.members ?? [];
   const access = membersQuery.data?.access;
   const pendingHumanJoinRequests =
     joinRequestsQuery.data?.filter((request) => request.requestType === "human") ?? [];
@@ -449,13 +479,13 @@ export function CompanyAccess() {
               </label>
             </div>
             <label className="block space-y-2 text-sm">
-              <span className="font-medium">Manager</span>
+              <span className="font-medium">Report to</span>
               <select
                 className="w-full rounded-md border border-border bg-background px-3 py-2"
                 value={employeeManagerKey}
                 onChange={(event) => setEmployeeManagerKey(event.target.value)}
               >
-                <option value="">Select a manager</option>
+                <option value="">Select who to report to</option>
                 {managerOptions.map((option) => (
                   <option key={option.key} value={option.key}>
                     {option.label}
@@ -464,7 +494,7 @@ export function CompanyAccess() {
               </select>
               {managerOptions.length === 0 ? (
                 <span className="text-xs text-muted-foreground">
-                  Create an agent or employee manager first so this employee has a reporting line.
+                  Invite users first so this employee has a reporting line.
                 </span>
               ) : null}
             </label>
@@ -637,6 +667,37 @@ export function CompanyAccess() {
                 </label>
               </div>
 
+              <div className="rounded-lg border border-border px-3 py-3">
+                <div className="text-sm font-medium">Reports to</div>
+                {editingEmployee ? (
+                  <div className="mt-2 space-y-2">
+                    <select
+                      className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                      value={draftManagerMembershipId}
+                      onChange={(event) => setDraftManagerMembershipId(event.target.value)}
+                    >
+                      <option value="">No reporting manager</option>
+                      {managerUserOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    {draftManagerMembershipId ? (
+                      <p className="text-xs text-muted-foreground">
+                        {managerUserOptions.find((option) => option.id === draftManagerMembershipId)?.subtitle || "Selected manager"}
+                      </p>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">This user is currently at the top of their reporting branch.</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {formatEmployeeManagerLabel(null)}
+                  </p>
+                )}
+              </div>
+
               <div className="space-y-3">
                 <div>
                   <h3 className="text-sm font-medium">Grants</h3>
@@ -709,6 +770,7 @@ export function CompanyAccess() {
                   memberId: editingMember.id,
                   membershipRole: draftRole,
                   status: draftStatus,
+                  ...(editingEmployee ? { managerMembershipId: draftManagerMembershipId || null } : {}),
                   grants: [...draftGrants],
                 });
               }}
@@ -820,6 +882,21 @@ function isAssignableAgent(agent: Agent) {
 
 function isEditableMemberStatus(status: CompanyMember["status"]): status is EditableMemberStatus {
   return status === "pending" || status === "active" || status === "suspended";
+}
+
+function employeeRoleLabel(member: CompanyMember, employee: EmployeeRecord | undefined): string {
+  const roleFromEmployee = employee?.role?.trim();
+  if (roleFromEmployee) return roleFromEmployee;
+  if (member.membershipRole === "owner") return "CEO";
+  if (member.membershipRole) return HUMAN_COMPANY_MEMBERSHIP_ROLE_LABELS[member.membershipRole];
+  return "Member";
+}
+
+function formatEmployeeManagerLabel(manager: { type: "agent" | "employee"; displayName: string | null } | null): string {
+  if (!manager) return "No reporting manager is set.";
+  const displayName = manager.displayName?.trim();
+  if (displayName) return displayName;
+  return manager.type === "agent" ? "Agent manager" : "Employee manager";
 }
 
 function PendingJoinRequestCard({

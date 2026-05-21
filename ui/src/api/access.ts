@@ -208,6 +208,11 @@ export type EmployeeRecord = {
 
 export type EmployeesListResponse = {
   employees: EmployeeRecord[];
+  owners: Array<{
+    membershipId: string;
+    displayName: string;
+    status: "pending" | "active" | "suspended";
+  }>;
   access: {
     canCreateEmployees: boolean;
     canInviteUsers: boolean;
@@ -432,6 +437,7 @@ export const accessApi = {
     input: {
       membershipRole?: HumanCompanyRole | null;
       status?: "pending" | "active" | "suspended";
+      managerMembershipId?: string | null;
       grants: Array<{
         permissionKey: PermissionKey;
         scope?: Record<string, unknown> | null;

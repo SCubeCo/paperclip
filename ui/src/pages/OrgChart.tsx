@@ -1,17 +1,14 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { Link, useNavigate } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
-import { agentsApi, type OrgNode } from "../api/agents";
+import { accessApi, type EmployeeRecord } from "../api/access";
 import { useCompany } from "../context/CompanyContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { queryKeys } from "../lib/queryKeys";
-import { agentUrl } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { AgentIcon } from "../components/AgentIconPicker";
-import { Download, Maximize2, Minus, Network, Plus, Upload } from "lucide-react";
-import { AGENT_ROLE_LABELS, type Agent } from "@paperclipai/shared";
+import { Download, Maximize2, Minus, Network, Plus, Upload, UserRound } from "lucide-react";
 
 // Layout constants
 const CARD_W = 200;
@@ -35,6 +32,20 @@ interface LayoutNode {
   children: LayoutNode[];
 }
 
+interface EmployeeOrgNode {
+  id: string;
+  name: string;
+  role: string;
+  status: string;
+  reports: EmployeeOrgNode[];
+}
+
+interface OrgOwnerMember {
+  membershipId: string;
+  displayName: string;
+  status: "pending" | "active" | "suspended" | "archived";
+}
+
 interface Point {
   x: number;
   y: number;
@@ -53,7 +64,7 @@ interface TouchGesture {
 // ── Layout algorithm ────────────────────────────────────────────────────
 
 /** Compute the width each subtree needs. */
-function subtreeWidth(node: OrgNode): number {
+function subtreeWidth(node: EmployeeOrgNode): number {
   if (node.reports.length === 0) return CARD_W;
   const childrenW = node.reports.reduce((sum, c) => sum + subtreeWidth(c), 0);
   const gaps = (node.reports.length - 1) * GAP_X;
@@ -61,7 +72,7 @@ function subtreeWidth(node: OrgNode): number {
 }
 
 /** Recursively assign x,y positions. */
-function layoutTree(node: OrgNode, x: number, y: number): LayoutNode {
+function layoutTree(node: EmployeeOrgNode, x: number, y: number): LayoutNode {
   const totalW = subtreeWidth(node);
   const layoutChildren: LayoutNode[] = [];
 
@@ -89,7 +100,7 @@ function layoutTree(node: OrgNode, x: number, y: number): LayoutNode {
 }
 
 /** Layout all root nodes side by side. */
-function layoutForest(roots: OrgNode[]): LayoutNode[] {
+function layoutForest(roots: EmployeeOrgNode[]): LayoutNode[] {
   if (roots.length === 0) return [];
 
   const totalW = roots.reduce((sum, r) => sum + subtreeWidth(r), 0);
@@ -168,6 +179,130 @@ const statusDotColor: Record<string, string> = {
 };
 const defaultDotColor = "#a3a3a3";
 
+function toEmployeeNodeStatus(status: EmployeeRecord["workforceStatus"]): string {
+  if (status === "active") return "active";
+  if (status === "suspended") return "paused";
+  if (status === "pending_acceptance") return "idle";
+  return "terminated";
+}
+
+function ownerMemberStatusToNodeStatus(status: OrgOwnerMember["status"]): string {
+  if (status === "active") return "active";
+  if (status === "suspended") return "paused";
+  if (status === "pending") return "idle";
+  return "terminated";
+}
+
+function employeeOrgRole(employee: EmployeeRecord): string {
+  if (employee.workspaceRole === "owner") return "CEO";
+  const explicitRole = employee.role.trim();
+  if (explicitRole) return explicitRole;
+  if (employee.workspaceRole) return employee.workspaceRole;
+  return "Member";
+}
+
+function buildEmployeeOrgTree(employees: EmployeeRecord[], owners: OrgOwnerMember[]): EmployeeOrgNode[] {
+  const activeEmployees = employees.filter((employee) => employee.membershipStatus !== "archived");
+  const byMembershipId = new Map(activeEmployees.map((employee) => [employee.membershipId, employee]));
+  const ownerByMembershipId = new Map(
+    owners
+      .filter((owner) => !byMembershipId.has(owner.membershipId))
+      .map((owner) => [owner.membershipId, owner]),
+  );
+  const reportsByManager = new Map<string, EmployeeRecord[]>();
+  const knownManagerMembershipIds = new Set([
+    ...Array.from(byMembershipId.keys()),
+    ...Array.from(ownerByMembershipId.keys()),
+  ]);
+
+  const isOwner = (employee: EmployeeRecord) => employee.workspaceRole === "owner";
+
+  for (const employee of activeEmployees) {
+    if (isOwner(employee)) continue;
+    const managerMembershipId = employee.manager?.type === "employee"
+      ? employee.manager.membershipId ?? null
+      : null;
+    if (!managerMembershipId || !knownManagerMembershipIds.has(managerMembershipId)) continue;
+    const current = reportsByManager.get(managerMembershipId) ?? [];
+    current.push(employee);
+    reportsByManager.set(managerMembershipId, current);
+  }
+
+  const roots = activeEmployees.filter((employee) => {
+    if (isOwner(employee)) return true;
+    const managerMembershipId = employee.manager?.type === "employee"
+      ? employee.manager.membershipId ?? null
+      : null;
+    return !managerMembershipId || !knownManagerMembershipIds.has(managerMembershipId);
+  });
+
+  const visited = new Set<string>();
+  const toEmployeeNode = (employee: EmployeeRecord): EmployeeOrgNode => {
+    if (visited.has(employee.membershipId)) {
+      return {
+        id: employee.membershipId,
+        name: employee.displayName,
+        role: employeeOrgRole(employee),
+        status: toEmployeeNodeStatus(employee.workforceStatus),
+        reports: [],
+      };
+    }
+    visited.add(employee.membershipId);
+    const directReports = (reportsByManager.get(employee.membershipId) ?? [])
+      .slice()
+      .sort((a, b) => a.displayName.localeCompare(b.displayName))
+      .map(toEmployeeNode);
+    return {
+      id: employee.membershipId,
+      name: employee.displayName,
+      role: employeeOrgRole(employee),
+      status: toEmployeeNodeStatus(employee.workforceStatus),
+      reports: directReports,
+    };
+  };
+
+  const toOwnerNode = (owner: OrgOwnerMember): EmployeeOrgNode => {
+    const directReports = (reportsByManager.get(owner.membershipId) ?? [])
+      .slice()
+      .sort((a, b) => a.displayName.localeCompare(b.displayName))
+      .map(toEmployeeNode);
+    return {
+      id: owner.membershipId,
+      name: owner.displayName,
+      role: "CEO",
+      status: ownerMemberStatusToNodeStatus(owner.status),
+      reports: directReports,
+    };
+  };
+
+  const orderedRoots = roots
+    .slice()
+    .sort((a, b) => {
+      if (a.workspaceRole === "owner" && b.workspaceRole !== "owner") return -1;
+      if (b.workspaceRole === "owner" && a.workspaceRole !== "owner") return 1;
+      return a.displayName.localeCompare(b.displayName);
+    });
+
+  const tree: EmployeeOrgNode[] = [];
+  const ownerRoots = Array.from(ownerByMembershipId.values())
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  for (const owner of ownerRoots) {
+    tree.push(toOwnerNode(owner));
+  }
+  for (const root of orderedRoots) {
+    tree.push(toEmployeeNode(root));
+  }
+
+  const unvisitedRoots = activeEmployees
+    .filter((employee) => !visited.has(employee.membershipId))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  for (const employee of unvisitedRoots) {
+    tree.push(toEmployeeNode(employee));
+  }
+
+  return tree;
+}
+
 // ── Main component ──────────────────────────────────────────────────────
 
 export function OrgChart() {
@@ -175,30 +310,30 @@ export function OrgChart() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const navigate = useNavigate();
 
-  const { data: orgTree, isLoading } = useQuery({
-    queryKey: queryKeys.org(selectedCompanyId!),
-    queryFn: () => agentsApi.org(selectedCompanyId!),
+  const { data: employeesResponse, isLoading } = useQuery({
+    queryKey: queryKeys.access.employees(selectedCompanyId!),
+    queryFn: () => accessApi.listEmployees(selectedCompanyId!),
     enabled: !!selectedCompanyId,
   });
-
-  const { data: agents } = useQuery({
-    queryKey: queryKeys.agents.list(selectedCompanyId!),
-    queryFn: () => agentsApi.list(selectedCompanyId!),
-    enabled: !!selectedCompanyId,
-  });
-
-  const agentMap = useMemo(() => {
-    const m = new Map<string, Agent>();
-    for (const a of agents ?? []) m.set(a.id, a);
-    return m;
-  }, [agents]);
 
   useEffect(() => {
     setBreadcrumbs([{ label: "Org Chart" }]);
   }, [setBreadcrumbs]);
 
+  const ownerMembers = useMemo<OrgOwnerMember[]>(() => {
+    return (employeesResponse?.owners ?? []).map((owner) => ({
+      membershipId: owner.membershipId,
+      displayName: owner.displayName,
+      status: owner.status,
+    }));
+  }, [employeesResponse?.owners]);
+
   // Layout computation
-  const layout = useMemo(() => layoutForest(orgTree ?? []), [orgTree]);
+  const employeeTree = useMemo(
+    () => buildEmployeeOrgTree(employeesResponse?.employees ?? [], ownerMembers),
+    [employeesResponse?.employees, ownerMembers],
+  );
+  const layout = useMemo(() => layoutForest(employeeTree), [employeeTree]);
   const allNodes = useMemo(() => flattenLayout(layout), [layout]);
   const edges = useMemo(() => collectEdges(layout), [layout]);
 
@@ -436,7 +571,7 @@ export function OrgChart() {
     return <PageSkeleton variant="org-chart" />;
   }
 
-  if (orgTree && orgTree.length === 0) {
+  if (employeeTree.length === 0) {
     return <EmptyState icon={Network} message="No organizational hierarchy defined." />;
   }
 
@@ -558,7 +693,6 @@ export function OrgChart() {
           }}
         >
           {allNodes.map((node) => {
-            const agent = agentMap.get(node.id);
             const dotColor = statusDotColor[node.status] ?? defaultDotColor;
 
             return (
@@ -572,7 +706,7 @@ export function OrgChart() {
                   width: CARD_W,
                   minHeight: CARD_H,
                 }}
-                onClick={() => navigate(agent ? agentUrl(agent) : `/agents/${node.id}`)}
+                onClick={() => navigate("/company/settings/access")}
                 onClickCapture={(e) => {
                   if (!suppressNextCardClick.current) return;
                   suppressNextCardClick.current = false;
@@ -581,34 +715,24 @@ export function OrgChart() {
                 }}
               >
                 <div className="flex items-center px-4 py-3 gap-3">
-                  {/* Agent icon + status dot */}
+                  {/* User icon + status dot */}
                   <div className="relative shrink-0">
                     <div className="w-9 h-9 rounded-full bg-muted flex items-center justify-center">
-                      <AgentIcon icon={agent?.icon} className="h-4.5 w-4.5 text-foreground/70" />
+                      <UserRound className="h-4.5 w-4.5 text-foreground/70" />
                     </div>
                     <span
                       className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-card"
                       style={{ backgroundColor: dotColor }}
                     />
                   </div>
-                  {/* Name + role + adapter type */}
+                  {/* Name + role */}
                   <div className="flex flex-col items-start min-w-0 flex-1">
                     <span className="text-sm font-semibold text-foreground leading-tight">
                       {node.name}
                     </span>
                     <span className="text-[11px] text-muted-foreground leading-tight mt-0.5">
-                      {agent?.title ?? roleLabel(node.role)}
+                      {roleLabel(node.role)}
                     </span>
-                    {agent && (
-                      <span className="text-[10px] text-muted-foreground/60 font-mono leading-tight mt-1">
-                        {getAdapterLabel(agent.adapterType)}
-                      </span>
-                    )}
-                    {agent && agent.capabilities && (
-                      <span className="text-[10px] text-muted-foreground/80 leading-tight mt-1 line-clamp-2">
-                        {agent.capabilities}
-                      </span>
-                    )}
                   </div>
                 </div>
               </div>
@@ -620,8 +744,7 @@ export function OrgChart() {
   );
 }
 
-const roleLabels: Record<string, string> = AGENT_ROLE_LABELS;
-
 function roleLabel(role: string): string {
-  return roleLabels[role] ?? role;
+  if (!role.trim()) return "Member";
+  return role;
 }

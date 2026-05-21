@@ -267,7 +267,7 @@ describe("syncEmployeeMembershipState", () => {
     expect(agents.pause).not.toHaveBeenCalled();
   });
 
-  it("terminates linked personal agents when a membership is archived", async () => {
+  it("deletes linked personal agents when a membership is archived", async () => {
     const { db, updateSetMock } = createDbStub([
       [
         {
@@ -317,6 +317,7 @@ describe("syncEmployeeMembershipState", () => {
       resume: vi.fn(() => Promise.resolve(undefined)),
       pause: vi.fn(() => Promise.resolve(undefined)),
       terminate: vi.fn(() => Promise.resolve(undefined)),
+      remove: vi.fn(() => Promise.resolve(undefined)),
     };
 
     await syncEmployeeMembershipState(
@@ -331,7 +332,8 @@ describe("syncEmployeeMembershipState", () => {
     expect(updateSetMock).toHaveBeenCalledWith(
       expect.objectContaining({ availabilityStatus: "suspended" }),
     );
-    expect(agents.terminate).toHaveBeenCalledWith("assistant-agent-2");
+    expect(agents.remove).toHaveBeenCalledWith("assistant-agent-2");
+    expect(agents.terminate).not.toHaveBeenCalled();
     expect(agents.pause).not.toHaveBeenCalled();
     expect(agents.resume).not.toHaveBeenCalled();
   });

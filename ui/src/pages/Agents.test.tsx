@@ -41,7 +41,7 @@ vi.mock("../context/BreadcrumbContext", () => ({
 }));
 
 vi.mock("../context/SidebarContext", () => ({
-  useSidebar: () => ({ isMobile: false }),
+  useSidebar: () => ({ isMobile: true }),
 }));
 
 vi.mock("../api/agents", () => ({

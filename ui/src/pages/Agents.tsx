@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { Link, useNavigate, useLocation } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
-import { agentsApi, type OrgNode } from "../api/agents";
+import { agentsApi } from "../api/agents";
 import { accessApi, type EmployeeRecord } from "../api/access";
 import { heartbeatsApi } from "../api/heartbeats";
 import { useCompany } from "../context/CompanyContext";
@@ -74,11 +74,105 @@ function getConfiguredModel(agent: Agent): string | null {
   return model.length > 0 ? model : null;
 }
 
-function filterOrgTree(nodes: OrgNode[], tab: FilterTab, showTerminated: boolean): OrgNode[] {
+type EmployeeOrgNode = {
+  id: string;
+  name: string;
+  role: string;
+  workforceStatus: EmployeeRecord["workforceStatus"];
+  reports: EmployeeOrgNode[];
+};
+
+function matchesEmployeeOrgFilter(status: EmployeeRecord["workforceStatus"], tab: FilterTab): boolean {
+  if (tab === "all") return true;
+  if (tab === "active") return status === "active";
+  if (tab === "paused") return status === "suspended";
+  if (tab === "error") return false;
+  return true;
+}
+
+function employeeOrgRole(employee: EmployeeRecord): string {
+  if (employee.workspaceRole === "owner") return "CEO";
+  const explicitRole = employee.role.trim();
+  if (explicitRole) return explicitRole;
+  if (employee.workspaceRole) return employee.workspaceRole;
+  return "Member";
+}
+
+function buildEmployeeOrgTree(employees: EmployeeRecord[]): EmployeeOrgNode[] {
+  const activeEmployees = employees.filter((employee) => employee.membershipStatus !== "archived");
+  const byMembershipId = new Map(activeEmployees.map((employee) => [employee.membershipId, employee]));
+  const reportsByManager = new Map<string, EmployeeRecord[]>();
+
+  const isOwner = (employee: EmployeeRecord) => employee.workspaceRole === "owner";
+
+  for (const employee of activeEmployees) {
+    if (isOwner(employee)) continue;
+    const managerMembershipId = employee.manager?.type === "employee"
+      ? employee.manager.membershipId ?? null
+      : null;
+    if (!managerMembershipId || !byMembershipId.has(managerMembershipId)) continue;
+    const current = reportsByManager.get(managerMembershipId) ?? [];
+    current.push(employee);
+    reportsByManager.set(managerMembershipId, current);
+  }
+
+  const roots = activeEmployees.filter((employee) => {
+    if (isOwner(employee)) return true;
+    const managerMembershipId = employee.manager?.type === "employee"
+      ? employee.manager.membershipId ?? null
+      : null;
+    return !managerMembershipId || !byMembershipId.has(managerMembershipId);
+  });
+
+  const visited = new Set<string>();
+  const toNode = (employee: EmployeeRecord): EmployeeOrgNode => {
+    if (visited.has(employee.membershipId)) {
+      return {
+        id: employee.id,
+        name: employee.displayName,
+        role: employeeOrgRole(employee),
+        workforceStatus: employee.workforceStatus,
+        reports: [],
+      };
+    }
+    visited.add(employee.membershipId);
+    const reports = (reportsByManager.get(employee.membershipId) ?? [])
+      .slice()
+      .sort((a, b) => a.displayName.localeCompare(b.displayName))
+      .map(toNode);
+    return {
+      id: employee.id,
+      name: employee.displayName,
+      role: employeeOrgRole(employee),
+      workforceStatus: employee.workforceStatus,
+      reports,
+    };
+  };
+
+  const orderedRoots = roots
+    .slice()
+    .sort((a, b) => {
+      if (a.workspaceRole === "owner" && b.workspaceRole !== "owner") return -1;
+      if (b.workspaceRole === "owner" && a.workspaceRole !== "owner") return 1;
+      return a.displayName.localeCompare(b.displayName);
+    });
+
+  const tree = orderedRoots.map(toNode);
+  const unvisitedRoots = activeEmployees
+    .filter((employee) => !visited.has(employee.membershipId))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  for (const employee of unvisitedRoots) {
+    tree.push(toNode(employee));
+  }
+
+  return tree;
+}
+
+function filterEmployeeOrgTree(nodes: EmployeeOrgNode[], tab: FilterTab): EmployeeOrgNode[] {
   return nodes
-    .reduce<OrgNode[]>((acc, node) => {
-      const filteredReports = filterOrgTree(node.reports, tab, showTerminated);
-      if (matchesFilter(node.status, tab, showTerminated) || filteredReports.length > 0) {
+    .reduce<EmployeeOrgNode[]>((acc, node) => {
+      const filteredReports = filterEmployeeOrgTree(node.reports, tab);
+      if (matchesEmployeeOrgFilter(node.workforceStatus, tab) || filteredReports.length > 0) {
         acc.push({ ...node, reports: filteredReports });
       }
       return acc;
@@ -111,12 +205,6 @@ export function Agents() {
     queryKey: queryKeys.access.employees(selectedCompanyId!),
     queryFn: () => accessApi.listEmployees(selectedCompanyId!),
     enabled: !!selectedCompanyId,
-  });
-
-  const { data: orgTree } = useQuery({
-    queryKey: queryKeys.org(selectedCompanyId!),
-    queryFn: () => agentsApi.org(selectedCompanyId!),
-    enabled: !!selectedCompanyId && effectiveView === "org",
   });
 
   const { data: runs } = useQuery({
@@ -161,7 +249,8 @@ export function Agents() {
 
   const filtered = filterAgents(agents ?? [], tab, showTerminated);
   const filteredEmployees = filterEmployees(employeesResponse?.employees ?? [], tab);
-  const filteredOrg = filterOrgTree(orgTree ?? [], tab, showTerminated);
+  const employeeOrgTree = buildEmployeeOrgTree(employeesResponse?.employees ?? []);
+  const filteredOrg = filterEmployeeOrgTree(employeeOrgTree, tab);
 
   return (
     <div className="space-y-4">
@@ -358,39 +447,18 @@ export function Agents() {
       {effectiveView === "org" && filteredOrg.length > 0 && (
         <div className="border border-border py-1">
           {filteredOrg.map((node) => (
-            <OrgTreeNode key={node.id} node={node} depth={0} agentMap={agentMap} liveRunByAgent={liveRunByAgent} tab={tab} />
+            <EmployeeOrgTreeNode key={node.id} node={node} depth={0} />
           ))}
         </div>
       )}
 
-      {effectiveView === "org" && filteredEmployees.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Human workforce</p>
-          <div className="border border-border">
-            {filteredEmployees.map((employee) => (
-              <EntityRow
-                key={employee.id}
-                title={employee.displayName}
-                subtitle={`${employee.role}${employee.department ? ` • ${employee.department}` : ""}${employee.personalAgent ? ` • AI ${employee.personalAgent.name}` : ""}`}
-                leading={<UserRound className="h-4 w-4 text-muted-foreground" />}
-                trailing={
-                  <span className={cn("rounded-full border px-2 py-0.5 text-xs capitalize", getEmployeeStatusClass(employee))}>
-                    {getEmployeeStatusLabel(employee)}
-                  </span>
-                }
-              />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {effectiveView === "org" && orgTree && orgTree.length > 0 && filteredOrg.length === 0 && filteredEmployees.length === 0 && (
+      {effectiveView === "org" && employeeOrgTree.length > 0 && filteredOrg.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8">
-          No agents or humans match the selected filter.
+          No users match the selected filter.
         </p>
       )}
 
-      {effectiveView === "org" && orgTree && orgTree.length === 0 && filteredEmployees.length === 0 && (
+      {effectiveView === "org" && employeeOrgTree.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8">
           No organizational hierarchy defined.
         </p>
@@ -399,85 +467,41 @@ export function Agents() {
   );
 }
 
-function OrgTreeNode({
+function EmployeeOrgTreeNode({
   node,
   depth,
-  agentMap,
-  liveRunByAgent,
-  tab,
 }: {
-  node: OrgNode;
+  node: EmployeeOrgNode;
   depth: number;
-  agentMap: Map<string, Agent>;
-  liveRunByAgent: Map<string, { runId: string; liveCount: number }>;
-  tab: FilterTab;
 }) {
-  const agent = agentMap.get(node.id);
-
-  const statusColor = agentStatusDot[node.status] ?? agentStatusDotDefault;
+  const statusColor = node.workforceStatus === "active"
+    ? "bg-green-400"
+    : node.workforceStatus === "suspended"
+      ? "bg-red-400"
+      : "bg-amber-400";
 
   return (
     <div style={{ paddingLeft: depth * 24 }}>
-      <Link
-        to={agent ? agentUrl(agent) : `/agents/${node.id}`}
-        className={cn("flex items-center gap-3 px-3 py-2 hover:bg-accent/30 transition-colors w-full text-left no-underline text-inherit", agent?.pausedAt && tab !== "paused" && "opacity-50")}
-      >
+      <div className="flex items-center gap-3 px-3 py-2 hover:bg-accent/30 transition-colors w-full text-left">
         <span className="relative flex h-2.5 w-2.5 shrink-0">
           <span className={`absolute inline-flex h-full w-full rounded-full ${statusColor}`} />
         </span>
         <div className="flex-1 min-w-0">
           <span className="text-sm font-medium">{node.name}</span>
           <span className="text-xs text-muted-foreground ml-2">
-            {roleLabels[node.role] ?? node.role}
-            {agent?.title ? ` - ${agent.title}` : ""}
+            {node.role}
           </span>
         </div>
-        <div className="flex items-center gap-3 shrink-0">
-          <span className="sm:hidden">
-            {liveRunByAgent.has(node.id) ? (
-              <LiveRunIndicator
-                agentRef={agent ? agentRouteRef(agent) : node.id}
-                runId={liveRunByAgent.get(node.id)!.runId}
-                liveCount={liveRunByAgent.get(node.id)!.liveCount}
-              />
-            ) : (
-              <StatusBadge status={node.status} />
-            )}
+        <span className="w-20 flex justify-end">
+          <span className="rounded-full border px-2 py-0.5 text-xs capitalize text-muted-foreground">
+            {node.workforceStatus === "pending_acceptance" ? "awaiting approval" : node.workforceStatus}
           </span>
-          <div className="hidden sm:flex items-center gap-3">
-            {liveRunByAgent.has(node.id) && (
-              <LiveRunIndicator
-                agentRef={agent ? agentRouteRef(agent) : node.id}
-                runId={liveRunByAgent.get(node.id)!.runId}
-                liveCount={liveRunByAgent.get(node.id)!.liveCount}
-              />
-            )}
-            {agent && (
-              <>
-                <span className="w-28 whitespace-nowrap text-left font-mono text-xs text-muted-foreground">
-                  {getAdapterLabel(agent.adapterType)}
-                </span>
-                <span
-                  className="w-36 truncate text-left font-mono text-xs text-muted-foreground"
-                  title={getConfiguredModel(agent) ?? undefined}
-                >
-                  {getConfiguredModel(agent) ?? "—"}
-                </span>
-                <span className="text-xs text-muted-foreground w-16 text-right">
-                  {agent.lastHeartbeatAt ? relativeTime(agent.lastHeartbeatAt) : "—"}
-                </span>
-              </>
-            )}
-            <span className="w-20 flex justify-end">
-              <StatusBadge status={node.status} />
-            </span>
-          </div>
-        </div>
-      </Link>
+        </span>
+      </div>
       {node.reports && node.reports.length > 0 && (
         <div className="border-l border-border/50 ml-4">
           {node.reports.map((child) => (
-            <OrgTreeNode key={child.id} node={child} depth={depth + 1} agentMap={agentMap} liveRunByAgent={liveRunByAgent} tab={tab} />
+            <EmployeeOrgTreeNode key={child.id} node={child} depth={depth + 1} />
           ))}
         </div>
       )}

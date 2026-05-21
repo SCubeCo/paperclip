@@ -17,13 +17,13 @@ import { buildCompanyUserInlineOptions, buildMarkdownMentionOptions } from "../l
 import { queryKeys } from "../lib/queryKeys";
 import { orderReusableExecutionWorkspaces } from "../lib/reusable-execution-workspaces";
 import { useProjectOrder } from "../hooks/useProjectOrder";
-import { getRecentAssigneeIds, sortAgentsByRecency, trackRecentAssignee } from "../lib/recent-assignees";
 import { getRecentProjectIds, trackRecentProject } from "../lib/recent-projects";
 import { buildExecutionPolicy } from "../lib/issue-execution-policy";
 import { useToastActions } from "../context/ToastContext";
 import {
   assigneeValueFromSelection,
   currentUserAssigneeOption,
+  formatAssigneeUserLabel,
   parseAssigneeValue,
 } from "../lib/assignees";
 import {
@@ -78,6 +78,8 @@ interface IssueDraft {
   status: string;
   priority: string;
   assigneeValue: string;
+  assigneeAgentId?: string;
+  assigneeUserIds?: string[];
   reviewerValue: string;
   approverValue: string;
   assigneeId?: string;
@@ -414,6 +416,8 @@ export function NewIssueDialog() {
   const [status, setStatus] = useState("todo");
   const [priority, setPriority] = useState("");
   const [assigneeValue, setAssigneeValue] = useState("");
+  const [assigneeAgentId, setAssigneeAgentId] = useState("");
+  const [assigneeUserIds, setAssigneeUserIds] = useState<string[]>([]);
   const [reviewerValue, setReviewerValue] = useState("");
   const [approverValue, setApproverValue] = useState("");
   const [showReviewerRow, setShowReviewerRow] = useState(false);
@@ -508,8 +512,7 @@ export function NewIssueDialog() {
   });
 
   const selectedAssignee = useMemo(() => parseAssigneeValue(assigneeValue), [assigneeValue]);
-  const selectedAssigneeAgentId = selectedAssignee.assigneeAgentId;
-  const selectedAssigneeUserId = selectedAssignee.assigneeUserId;
+  const selectedAssigneeAgentId = assigneeAgentId || selectedAssignee.assigneeAgentId;
 
   const assigneeAdapterType = (agents ?? []).find((agent) => agent.id === selectedAssigneeAgentId)?.adapterType ?? null;
   const supportsAssigneeOverrides = Boolean(
@@ -555,32 +558,53 @@ export function NewIssueDialog() {
     mutationFn: async ({
       companyId,
       stagedFiles: pendingStagedFiles,
+      assigneeAgentId: pendingAssigneeAgentId,
+      assigneeUserIds: pendingAssigneeUserIds,
       ...data
-    }: { companyId: string; stagedFiles: StagedIssueFile[] } & Record<string, unknown>) => {
-      const issue = await issuesApi.create(companyId, data);
-      const failures: string[] = [];
+    }: {
+      companyId: string;
+      stagedFiles: StagedIssueFile[];
+      assigneeAgentId?: string;
+      assigneeUserIds?: string[];
+    } & Record<string, unknown>) => {
+      const targetUserIds = (pendingAssigneeUserIds ?? []).filter((value) => value.trim().length > 0);
+      const targetAgentId = pendingAssigneeAgentId?.trim() ?? "";
+      const issuePayloads = targetUserIds.length > 0 || targetAgentId
+        ? [
+            ...targetUserIds.map((userId) => ({ ...data, assigneeUserId: userId })),
+            ...(targetAgentId ? [{ ...data, assigneeAgentId: targetAgentId }] : []),
+          ]
+        : [data];
 
-      for (const stagedFile of pendingStagedFiles) {
-        try {
-          if (stagedFile.kind === "document") {
-            const body = await stagedFile.file.text();
-            await issuesApi.upsertDocument(issue.id, stagedFile.documentKey ?? "document", {
-              title: stagedFile.documentKey === "plan" ? null : stagedFile.title ?? null,
-              format: "markdown",
-              body,
-              baseRevisionId: null,
-            });
-          } else {
-            await issuesApi.uploadAttachment(companyId, issue.id, stagedFile.file);
+      const failures: string[] = [];
+      const createdIssues: Array<{ id: string; identifier?: string | null }> = [];
+
+      for (const payload of issuePayloads) {
+        const issue = await issuesApi.create(companyId, payload);
+        createdIssues.push({ id: issue.id, identifier: issue.identifier ?? null });
+
+        for (const stagedFile of pendingStagedFiles) {
+          try {
+            if (stagedFile.kind === "document") {
+              const body = await stagedFile.file.text();
+              await issuesApi.upsertDocument(issue.id, stagedFile.documentKey ?? "document", {
+                title: stagedFile.documentKey === "plan" ? null : stagedFile.title ?? null,
+                format: "markdown",
+                body,
+                baseRevisionId: null,
+              });
+            } else {
+              await issuesApi.uploadAttachment(companyId, issue.id, stagedFile.file);
+            }
+          } catch {
+            failures.push(stagedFile.file.name);
           }
-        } catch {
-          failures.push(stagedFile.file.name);
         }
       }
 
-      return { issue, companyId, failures };
+      return { issues: createdIssues, companyId, failures, usedAgentAssignee: Boolean(targetAgentId) };
     },
-    onSuccess: ({ issue, companyId, failures }) => {
+    onSuccess: ({ issues, companyId, failures, usedAgentAssignee }) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.listMineByMe(companyId) });
       queryClient.invalidateQueries({ queryKey: queryKeys.issues.listTouchedByMe(companyId) });
@@ -589,7 +613,8 @@ export function NewIssueDialog() {
       if (draftTimer.current) clearTimeout(draftTimer.current);
       if (failures.length > 0) {
         const prefix = (companies.find((company) => company.id === companyId)?.issuePrefix ?? "").trim();
-        const issueRef = issue.identifier ?? issue.id;
+        const firstIssue = issues[0];
+        const issueRef = firstIssue ? (firstIssue.identifier ?? firstIssue.id) : "issue";
         pushToast({
           title: `Created ${issueRef} with upload warnings`,
           body: `${failures.length} staged ${failures.length === 1 ? "file" : "files"} could not be added.`,
@@ -597,6 +622,15 @@ export function NewIssueDialog() {
           action: prefix
             ? { label: `Open ${issueRef}`, href: `/${prefix}/issues/${issueRef}` }
             : undefined,
+        });
+      }
+      if (issues.length > 1) {
+        pushToast({
+          title: `Created ${issues.length} issues`,
+          body: usedAgentAssignee
+            ? "One issue was created per selected assignee."
+            : "One issue was created per selected user.",
+          tone: "success",
         });
       }
       clearDraft();
@@ -646,6 +680,8 @@ export function NewIssueDialog() {
       status,
       priority,
       assigneeValue,
+      assigneeAgentId,
+      assigneeUserIds,
       reviewerValue,
       approverValue,
       projectId,
@@ -664,6 +700,8 @@ export function NewIssueDialog() {
     status,
     priority,
     assigneeValue,
+    assigneeAgentId,
+    assigneeUserIds,
     reviewerValue,
     approverValue,
     projectId,
@@ -700,6 +738,8 @@ export function NewIssueDialog() {
     status,
     priority,
     assigneeValue,
+    assigneeAgentId,
+    assigneeUserIds,
     reviewerValue,
     approverValue,
     projectId,
@@ -741,7 +781,12 @@ export function NewIssueDialog() {
       setPriority(newIssueDefaults.priority ?? "");
       setProjectId(defaultProjectId);
       setProjectWorkspaceId(defaultProjectWorkspaceId);
-      setAssigneeValue(assigneeValueFromSelection(newIssueDefaults));
+      const defaultUserId = typeof newIssueDefaults.assigneeUserId === "string"
+        ? newIssueDefaults.assigneeUserId
+        : "";
+      setAssigneeValue("");
+      setAssigneeAgentId("");
+      setAssigneeUserIds(defaultUserId ? [defaultUserId] : []);
       setAssigneeModelLane("primary");
       setAssigneeModelOverride("");
       setAssigneeThinkingEffort("");
@@ -762,7 +807,15 @@ export function NewIssueDialog() {
       const hasExplicitProjectWorkspaceId = newIssueDefaults.projectWorkspaceId !== undefined;
       setProjectId(defaultProjectId);
       setProjectWorkspaceId(newIssueDefaults.projectWorkspaceId ?? defaultProjectWorkspaceIdForProject(defaultProject));
-      setAssigneeValue(assigneeValueFromSelection(newIssueDefaults));
+      const defaultUserId = typeof newIssueDefaults.assigneeUserId === "string"
+        ? newIssueDefaults.assigneeUserId
+        : "";
+      const defaultAgentId = typeof newIssueDefaults.assigneeAgentId === "string"
+        ? newIssueDefaults.assigneeAgentId
+        : "";
+      setAssigneeValue("");
+      setAssigneeAgentId(defaultAgentId);
+      setAssigneeUserIds(defaultUserId ? [defaultUserId] : []);
       setReviewerValue("");
       setApproverValue("");
       setShowReviewerRow(false);
@@ -786,10 +839,21 @@ export function NewIssueDialog() {
       setIssueText(draft.title, draft.description);
       setStatus(draft.status || "todo");
       setPriority(draft.priority);
-      setAssigneeValue(
-        newIssueDefaults.assigneeAgentId || newIssueDefaults.assigneeUserId
-          ? assigneeValueFromSelection(newIssueDefaults)
-          : (draft.assigneeValue ?? draft.assigneeId ?? ""),
+      const defaultUserId = typeof newIssueDefaults.assigneeUserId === "string"
+        ? newIssueDefaults.assigneeUserId
+        : "";
+      const restoredSingleUserId = parseAssigneeValue(draft.assigneeValue ?? draft.assigneeId ?? "").assigneeUserId;
+      const restoredSingleAgentId = parseAssigneeValue(draft.assigneeValue ?? draft.assigneeId ?? "").assigneeAgentId;
+      const restoredAgentId = typeof draft.assigneeAgentId === "string" && draft.assigneeAgentId.trim().length > 0
+        ? draft.assigneeAgentId
+        : (restoredSingleAgentId ?? "");
+      setAssigneeValue("");
+      setAssigneeAgentId(restoredAgentId);
+      setAssigneeUserIds(
+        defaultUserId
+          ? [defaultUserId]
+          : (draft.assigneeUserIds?.filter((value) => value.trim().length > 0)
+            ?? (restoredSingleUserId ? [restoredSingleUserId] : [])),
       );
       setReviewerValue(draft.reviewerValue ?? "");
       setApproverValue(draft.approverValue ?? "");
@@ -832,7 +896,15 @@ export function NewIssueDialog() {
       setPriority(newIssueDefaults.priority ?? "");
       setProjectId(defaultProjectId);
       setProjectWorkspaceId(newIssueDefaults.projectWorkspaceId ?? defaultProjectWorkspaceIdForProject(defaultProject));
-      setAssigneeValue(assigneeValueFromSelection(newIssueDefaults));
+      const defaultUserId = typeof newIssueDefaults.assigneeUserId === "string"
+        ? newIssueDefaults.assigneeUserId
+        : "";
+      const defaultAgentId = typeof newIssueDefaults.assigneeAgentId === "string"
+        ? newIssueDefaults.assigneeAgentId
+        : "";
+      setAssigneeValue("");
+      setAssigneeAgentId(defaultAgentId);
+      setAssigneeUserIds(defaultUserId ? [defaultUserId] : []);
       setReviewerValue("");
       setApproverValue("");
       setShowReviewerRow(false);
@@ -890,6 +962,8 @@ export function NewIssueDialog() {
     setStatus("todo");
     setPriority("");
     setAssigneeValue("");
+    setAssigneeAgentId("");
+    setAssigneeUserIds([]);
     setReviewerValue("");
     setApproverValue("");
     setShowReviewerRow(false);
@@ -918,6 +992,8 @@ export function NewIssueDialog() {
     if (companyId === effectiveCompanyId) return;
     setDialogCompanyId(companyId);
     setAssigneeValue("");
+    setAssigneeAgentId("");
+    setAssigneeUserIds([]);
     setReviewerValue("");
     setApproverValue("");
     setShowReviewerRow(false);
@@ -982,8 +1058,8 @@ export function NewIssueDialog() {
       status,
       priority: priority || "medium",
       workMode,
-      ...(selectedAssigneeAgentId ? { assigneeAgentId: selectedAssigneeAgentId } : {}),
-      ...(selectedAssigneeUserId ? { assigneeUserId: selectedAssigneeUserId } : {}),
+      ...(assigneeAgentId ? { assigneeAgentId } : {}),
+      ...(assigneeUserIds.length > 0 ? { assigneeUserIds } : {}),
       ...(newIssueDefaults.parentId ? { parentId: newIssueDefaults.parentId } : {}),
       ...(newIssueDefaults.goalId ? { goalId: newIssueDefaults.goalId } : {}),
       ...(projectId ? { projectId } : {}),
@@ -1068,12 +1144,16 @@ export function NewIssueDialog() {
     setStagedFiles((current) => current.filter((file) => file.id !== id));
   }
 
-  const hasDraft = draftHasText || stagedFiles.length > 0;
+  const hasDraft = draftHasText || stagedFiles.length > 0 || Boolean(assigneeAgentId) || assigneeUserIds.length > 0;
   const currentStatus = statuses.find((s) => s.value === status) ?? statuses[1]!;
   const currentPriority = priorities.find((p) => p.value === priority);
-  const currentAssignee = selectedAssigneeAgentId
-    ? (agents ?? []).find((a) => a.id === selectedAssigneeAgentId)
-    : null;
+  const assigneeUserLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const user of companyMembers?.users ?? []) {
+      map.set(user.principalId, user.user?.name?.trim() || user.user?.email?.trim() || user.principalId);
+    }
+    return map;
+  }, [companyMembers?.users]);
   const currentProject = orderedProjects.find((project) => project.id === projectId);
   const currentProjectExecutionWorkspacePolicy =
     experimentalSettings?.enableIsolatedWorkspaces === true
@@ -1107,26 +1187,30 @@ export function NewIssueDialog() {
       : assigneeAdapterType === "opencode_local"
         ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
       : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
-  const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), [newIssueOpen]);
   const recentAssigneeOptionIds = useMemo(
-    () => recentAssigneeIds.map((id) => assigneeValueFromSelection({ assigneeAgentId: id })),
-    [recentAssigneeIds],
+    () => [],
+    [],
   );
   const recentProjectIds = useMemo(() => getRecentProjectIds(), [newIssueOpen]);
   const assigneeOptions = useMemo<InlineEntityOption[]>(
     () => [
-      ...currentUserAssigneeOption(currentUserId),
-      ...buildCompanyUserInlineOptions(companyMembers?.users, { excludeUserIds: [currentUserId] }),
-      ...sortAgentsByRecency(
-        (agents ?? []).filter((agent) => agent.status !== "terminated"),
-        recentAssigneeIds,
-      ).map((agent) => ({
-        id: assigneeValueFromSelection({ assigneeAgentId: agent.id }),
-        label: agent.name,
-        searchText: `${agent.name} ${agent.role} ${agent.title ?? ""}`,
-      })),
+      ...currentUserAssigneeOption(currentUserId).filter((option) => {
+        const parsed = parseAssigneeValue(option.id);
+        return parsed.assigneeUserId ? !assigneeUserIds.includes(parsed.assigneeUserId) : false;
+      }),
+      ...buildCompanyUserInlineOptions(companyMembers?.users, {
+        excludeUserIds: [...assigneeUserIds, currentUserId],
+      }),
+      ...(agents ?? [])
+        .filter((agent) => agent.status !== "terminated")
+        .filter((agent) => !assigneeAgentId || agent.id === assigneeAgentId)
+        .map((agent) => ({
+          id: assigneeValueFromSelection({ assigneeAgentId: agent.id }),
+          label: agent.name,
+          searchText: `${agent.name} ${agent.id} agent`,
+        })),
     ],
-    [agents, companyMembers?.users, currentUserId, recentAssigneeIds],
+    [agents, assigneeAgentId, assigneeUserIds, companyMembers?.users, currentUserId],
   );
   const projectOptions = useMemo<InlineEntityOption[]>(
     () =>
@@ -1337,19 +1421,26 @@ export function NewIssueDialog() {
                 value={assigneeValue}
                 options={assigneeOptions}
                 recentOptionIds={recentAssigneeOptionIds}
-                placeholder="Assignee"
+                placeholder="Add assignees"
                 disablePortal
-                noneLabel="No assignee"
+                noneLabel="No assignees"
                 searchPlaceholder="Search assignees..."
                 emptyMessage="No assignees found."
                 onChange={(value) => {
                   const nextAssignee = parseAssigneeValue(value);
-                  if (nextAssignee.assigneeAgentId) {
-                    trackRecentAssignee(nextAssignee.assigneeAgentId);
+                  if (!nextAssignee.assigneeUserId && !nextAssignee.assigneeAgentId) {
+                    setAssigneeValue("");
+                    return;
                   }
-                  setAssigneeValue(value);
-                  const hasAssignee = Boolean(nextAssignee.assigneeAgentId || nextAssignee.assigneeUserId);
-                  if (hasAssignee && status === "backlog") {
+                  if (nextAssignee.assigneeUserId) {
+                    setAssigneeUserIds((current) => current.includes(nextAssignee.assigneeUserId!)
+                      ? current
+                      : [...current, nextAssignee.assigneeUserId!]);
+                  } else if (nextAssignee.assigneeAgentId) {
+                    setAssigneeAgentId(nextAssignee.assigneeAgentId);
+                  }
+                  setAssigneeValue("");
+                  if (status === "backlog") {
                     setStatus("todo");
                   }
                 }}
@@ -1362,31 +1453,62 @@ export function NewIssueDialog() {
                 }}
                 renderTriggerValue={(option) =>
                   option ? (
-                    currentAssignee ? (
-                      <>
-                        <AgentIcon icon={currentAssignee.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                        <span className="truncate">{option.label}</span>
-                      </>
-                    ) : (
-                      <span className="truncate">{option.label}</span>
-                    )
+                    <span className="truncate">{option.label}</span>
                   ) : (
-                    <span className="text-muted-foreground">Assignee</span>
+                    <span className="text-muted-foreground">Add assignees</span>
                   )
                 }
                 renderOption={(option) => {
-                  if (!option.id) return <span className="truncate">{option.label}</span>;
-                  const assignee = parseAssigneeValue(option.id).assigneeAgentId
-                    ? (agents ?? []).find((agent) => agent.id === parseAssigneeValue(option.id).assigneeAgentId)
+                  const optionAssignee = parseAssigneeValue(option.id);
+                  const optionAgent = optionAssignee.assigneeAgentId
+                    ? (agents ?? []).find((agent) => agent.id === optionAssignee.assigneeAgentId)
                     : null;
                   return (
                     <>
-                      {assignee ? <AgentIcon icon={assignee.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : null}
+                      {optionAgent ? <AgentIcon icon={optionAgent.icon} className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : null}
                       <span className="truncate">{option.label}</span>
                     </>
                   );
                 }}
               />
+              {assigneeAgentId ? (
+                <span className="inline-flex items-center gap-1 rounded border border-border px-2 py-0.5 text-xs">
+                  <AgentIcon
+                    icon={(agents ?? []).find((agent) => agent.id === assigneeAgentId)?.icon ?? null}
+                    className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+                  />
+                  <span className="truncate max-w-[10rem]">{
+                    (agents ?? []).find((agent) => agent.id === assigneeAgentId)?.name ?? assigneeAgentId
+                  }</span>
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={() => setAssigneeAgentId("")}
+                    aria-label="Remove agent assignee"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ) : null}
+              {assigneeUserIds.length > 0 ? (
+                <div className="flex items-center gap-1 flex-wrap">
+                  {assigneeUserIds.map((userId) => (
+                    <span key={userId} className="inline-flex items-center gap-1 rounded border border-border px-2 py-0.5 text-xs">
+                      <span className="truncate max-w-[10rem]">{formatAssigneeUserLabel(userId, currentUserId, assigneeUserLabelById) ?? userId}</span>
+                      <button
+                        type="button"
+                        className="text-muted-foreground hover:text-foreground"
+                        onClick={() => {
+                          setAssigneeUserIds((current) => current.filter((id) => id !== userId));
+                        }}
+                        aria-label={`Remove ${userId}`}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
               <span>in</span>
               <InlineEntitySelector
                 ref={projectSelectorRef}

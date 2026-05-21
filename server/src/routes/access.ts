@@ -2476,7 +2476,49 @@ async function resolveEmployeeManager(
       ),
     )
     .then((rows) => rows[0] ?? null);
-  if (!managerProfile) throw badRequest("Manager employee not found");
+
+  if (!managerProfile) {
+    const managerMembership = await db
+      .select({
+        membershipId: companyMemberships.id,
+        principalId: companyMemberships.principalId,
+        membershipRole: companyMemberships.membershipRole,
+        userName: authUsers.name,
+        userEmail: authUsers.email,
+      })
+      .from(companyMemberships)
+      .leftJoin(authUsers, eq(authUsers.id, companyMemberships.principalId))
+      .where(
+        and(
+          eq(companyMemberships.companyId, companyId),
+          eq(companyMemberships.id, manager.membershipId),
+          eq(companyMemberships.principalType, "user"),
+          ne(companyMemberships.status, "archived"),
+        ),
+      )
+      .then((rows) => rows[0] ?? null);
+    if (!managerMembership) throw badRequest("Manager user not found");
+
+    const ownerCeo =
+      managerMembership.membershipRole === "owner"
+        ? await findCompanyCeoAgent(db, companyId)
+        : null;
+    if (!ownerCeo) {
+      throw conflict("Selected manager user must be an employee profile or active owner with a CEO agent");
+    }
+
+    return {
+      managerRef: {
+        type: "employee" as const,
+        membershipId: managerMembership.membershipId,
+        displayName:
+          managerMembership.userName ??
+          managerMembership.userEmail ??
+          managerMembership.principalId,
+      },
+      reportsToAgentId: ownerCeo.id,
+    };
+  }
 
   const managerLink = await db
     .select({ agentId: employeeAiAgentLinks.agentId })
@@ -2543,6 +2585,7 @@ async function loadEmployeeRecords(db: Db, companyId: string) {
         and(
           eq(employeeAiAgentLinks.companyId, companyId),
           eq(employeeAiAgentLinks.isPrimary, true),
+          ne(dbAgents.status, "terminated"),
           inArray(employeeAiAgentLinks.membershipId, membershipIds),
         ),
       )
@@ -2699,6 +2742,16 @@ export async function syncEmployeeMembershipState(
       ),
     );
 
+  if (membership.status !== "archived" && links.length > 0) {
+    const liveLinks: Array<{ agentId: string }> = [];
+    for (const link of links) {
+      const linkedAgent = await agents.getById(link.agentId);
+      if (!linkedAgent || linkedAgent.status === "terminated") continue;
+      liveLinks.push(link);
+    }
+    links = liveLinks;
+  }
+
   const linkedOwnerCeo =
     membership.membershipRole === "owner"
       ? await findCompanyCeoAgent(db, companyId)
@@ -2759,7 +2812,7 @@ export async function syncEmployeeMembershipState(
 
     if (metadata.personalAgentId) {
       const existingAgent = await agents.getById(metadata.personalAgentId);
-      if (existingAgent?.companyId === companyId) {
+      if (existingAgent?.companyId === companyId && existingAgent.status !== "terminated") {
         linkedAgentId = existingAgent.id;
       }
     }
@@ -2861,9 +2914,7 @@ export async function syncEmployeeMembershipState(
       continue;
     }
     if (membership.status === "archived") {
-      if (linkedAgent.status !== "terminated") {
-        await agents.terminate(link.agentId);
-      }
+      await agents.remove(link.agentId);
       continue;
     }
     await access.setPrincipalGrants(companyId, "agent", link.agentId, grants, grantedByUserId);
@@ -4824,12 +4875,39 @@ export function accessRoutes(
   router.get("/companies/:companyId/employees", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const [employees, currentAccess] = await Promise.all([
+    const [employees, currentAccess, owners] = await Promise.all([
       loadEmployeeRecords(db, companyId),
       loadCompanyAccessSummary(req, access, companyId),
+      db
+        .select({
+          membershipId: companyMemberships.id,
+          status: companyMemberships.status,
+          principalId: companyMemberships.principalId,
+          userName: authUsers.name,
+          userEmail: authUsers.email,
+        })
+        .from(companyMemberships)
+        .leftJoin(authUsers, eq(authUsers.id, companyMemberships.principalId))
+        .where(
+          and(
+            eq(companyMemberships.companyId, companyId),
+            eq(companyMemberships.principalType, "user"),
+            eq(companyMemberships.membershipRole, "owner"),
+            ne(companyMemberships.status, "archived"),
+          ),
+        )
+        .then((rows) =>
+          rows.map((row) => ({
+            membershipId: row.membershipId,
+            displayName:
+              row.userName?.trim() || row.userEmail?.trim() || row.principalId,
+            status: row.status,
+          })),
+        ),
     ]);
     res.json({
       employees,
+      owners,
       access: {
         canCreateEmployees: currentAccess.canInviteUsers,
         canInviteUsers: currentAccess.canInviteUsers,
@@ -4991,15 +5069,39 @@ export function accessRoutes(
               .returning()
               .then((rows) => rows[0]);
 
-          await tx.insert(employeeAiAgentLinks).values({
-            companyId,
-            membershipId: membership.id,
-            agentId: personalAgent.id,
-            relationType: "assistant",
-            isPrimary: true,
-            createdAt: now,
-            updatedAt: now,
-          });
+          await tx
+            .update(employeeAiAgentLinks)
+            .set({ isPrimary: false, updatedAt: now })
+            .where(
+              and(
+                eq(employeeAiAgentLinks.companyId, companyId),
+                eq(employeeAiAgentLinks.membershipId, membership.id),
+              ),
+            );
+
+          await tx
+            .insert(employeeAiAgentLinks)
+            .values({
+              companyId,
+              membershipId: membership.id,
+              agentId: personalAgent.id,
+              relationType: "assistant",
+              isPrimary: true,
+              createdAt: now,
+              updatedAt: now,
+            })
+            .onConflictDoUpdate({
+              target: [
+                employeeAiAgentLinks.companyId,
+                employeeAiAgentLinks.membershipId,
+                employeeAiAgentLinks.agentId,
+              ],
+              set: {
+                relationType: "assistant",
+                isPrimary: true,
+                updatedAt: now,
+              },
+            });
 
           const inviteResult = await createCompanyInviteForCompany({
             req,
@@ -5654,6 +5756,85 @@ export function accessRoutes(
           );
         }
 
+        if (req.body.managerMembershipId !== undefined) {
+          const employeeProfile = await tx
+            .select()
+            .from(employeeProfiles)
+            .where(
+              and(
+                eq(employeeProfiles.companyId, companyId),
+                eq(employeeProfiles.membershipId, existing.id),
+              ),
+            )
+            .then((rows) => rows[0] ?? null);
+
+          if (!employeeProfile && req.body.managerMembershipId) {
+            throw badRequest("Reporting manager can only be set for employee memberships");
+          }
+
+          if (employeeProfile) {
+            const nextMetadata = normalizeEmployeeMetadata(employeeProfile.metadata);
+            if (!req.body.managerMembershipId) {
+              nextMetadata.manager = undefined;
+            } else {
+              if (req.body.managerMembershipId === existing.id) {
+                throw badRequest("A member cannot report to themselves");
+              }
+
+              const managerMembership = await tx
+                .select({
+                  membershipId: companyMemberships.id,
+                  principalId: companyMemberships.principalId,
+                  userName: authUsers.name,
+                  userEmail: authUsers.email,
+                })
+                .from(companyMemberships)
+                .leftJoin(authUsers, eq(authUsers.id, companyMemberships.principalId))
+                .where(
+                  and(
+                    eq(companyMemberships.companyId, companyId),
+                    eq(companyMemberships.id, req.body.managerMembershipId),
+                    eq(companyMemberships.principalType, "user"),
+                    ne(companyMemberships.status, "archived"),
+                  ),
+                )
+                .then((rows) => rows[0] ?? null);
+              if (!managerMembership) {
+                throw badRequest("Manager user not found");
+              }
+
+              const managerEmployeeProfile = await tx
+                .select({ displayName: employeeProfiles.displayName })
+                .from(employeeProfiles)
+                .where(
+                  and(
+                    eq(employeeProfiles.companyId, companyId),
+                    eq(employeeProfiles.membershipId, req.body.managerMembershipId),
+                  ),
+                )
+                .then((rows) => rows[0] ?? null);
+
+              nextMetadata.manager = {
+                type: "employee",
+                membershipId: managerMembership.membershipId,
+                displayName:
+                  managerEmployeeProfile?.displayName ??
+                  managerMembership.userName ??
+                  managerMembership.userEmail ??
+                  managerMembership.principalId,
+              };
+            }
+
+            await tx
+              .update(employeeProfiles)
+              .set({
+                metadata: nextMetadata,
+                updatedAt: now,
+              })
+              .where(eq(employeeProfiles.id, employeeProfile.id));
+          }
+        }
+
         return updatedMember;
       });
       if (!updated) throw notFound("Member not found");
@@ -5669,6 +5850,7 @@ export function accessRoutes(
           membershipRole: updated.membershipRole,
           status: updated.status,
           grantCount: req.body.grants?.length ?? 0,
+          managerMembershipId: req.body.managerMembershipId ?? undefined,
         },
       });
       await syncEmployeeMembershipState(

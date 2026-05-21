@@ -11,12 +11,14 @@ const listJoinRequestsMock = vi.hoisted(() => vi.fn());
 const updateMemberAccessMock = vi.hoisted(() => vi.fn());
 const archiveMemberMock = vi.hoisted(() => vi.fn());
 const listAgentsMock = vi.hoisted(() => vi.fn());
+const listEmployeesMock = vi.hoisted(() => vi.fn());
 const listIssuesMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/api/access", () => ({
   accessApi: {
     listMembers: (companyId: string) => listMembersMock(companyId),
     listJoinRequests: (companyId: string, status: string) => listJoinRequestsMock(companyId, status),
+    listEmployees: (companyId: string) => listEmployeesMock(companyId),
     updateMember: vi.fn(),
     updateMemberPermissions: vi.fn(),
     updateMemberAccess: (companyId: string, memberId: string, input: unknown) =>
@@ -156,6 +158,37 @@ describe("CompanyAccess", () => {
         status: "active",
       },
     ]);
+    listEmployeesMock.mockResolvedValue({
+      employees: [
+        {
+          id: "employee-1",
+          companyId: "company-1",
+          membershipId: "member-1",
+          membershipStatus: "active",
+          workforceStatus: "active",
+          workspaceRole: "owner",
+          displayName: "Codex Coder",
+          email: "codexcoder@paperclip.local",
+          role: "CEO",
+          department: "Leadership",
+          experienceLevel: "lead",
+          availabilityStatus: "available",
+          skills: [],
+          assignedProjects: [],
+          manager: { type: "employee", membershipId: "member-2", displayName: "Board User" },
+          invitation: null,
+          personalAgent: null,
+          memberUser: null,
+          createdAt: "2026-04-10T00:00:00.000Z",
+          updatedAt: "2026-04-10T00:00:00.000Z",
+        },
+      ],
+      access: {
+        canCreateEmployees: true,
+        canInviteUsers: true,
+        canManageMembers: true,
+      },
+    });
     listIssuesMock.mockResolvedValue([
       {
         id: "issue-1",
@@ -200,6 +233,14 @@ describe("CompanyAccess", () => {
     expect(container.textContent).not.toContain("Suspended user accounts");
     expect(container.textContent).not.toContain("Pending user joins");
 
+    const inviteManagerSelect = Array.from(container.querySelectorAll("select")).find((select) =>
+      Array.from(select.querySelectorAll("option")).some((option) => option.textContent?.includes("Select who to report to")),
+    );
+    expect(inviteManagerSelect).toBeTruthy();
+    expect(Array.from(inviteManagerSelect!.querySelectorAll("option")).some((option) => option.textContent?.includes("Codex Coder (CEO)"))).toBe(true);
+    expect(Array.from(inviteManagerSelect!.querySelectorAll("option")).some((option) => option.textContent?.includes("Board User (Operator)"))).toBe(true);
+    expect(Array.from(inviteManagerSelect!.querySelectorAll("option")).some((option) => option.textContent?.includes("Codex Worker"))).toBe(false);
+
     const editButton = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent === "Edit",
     );
@@ -211,6 +252,8 @@ describe("CompanyAccess", () => {
     await flushReact();
 
     expect(document.body.textContent).toContain("Implicit grants from role");
+    expect(document.body.textContent).toContain("Reports to");
+    expect(document.body.textContent).toContain("Board User");
     expect(document.body.textContent).toContain("Owner currently includes these permissions automatically.");
     expect(document.body.textContent).toContain(
       "Included implicitly by the Owner role. Add an explicit grant only if it should stay after the role changes.",
@@ -260,6 +303,7 @@ describe("CompanyAccess", () => {
     expect(updateMemberAccessMock).toHaveBeenCalledWith("company-1", "member-1", {
       membershipRole: "owner",
       status: "active",
+      managerMembershipId: "member-2",
       grants: [],
     });
 
@@ -297,7 +341,9 @@ describe("CompanyAccess", () => {
     expect(document.body.textContent).toContain("Remove member");
     expect(document.body.textContent).toContain("Assigned to removed user");
 
-    const reassignmentSelect = document.body.querySelector("select");
+    const reassignmentSelect = Array.from(document.body.querySelectorAll("select")).find((select) =>
+      Array.from(select.querySelectorAll("option")).some((option) => option.value === "user:user-2"),
+    ) as HTMLSelectElement | undefined;
     expect(reassignmentSelect).toBeTruthy();
     await act(async () => {
       reassignmentSelect!.value = "user:user-2";

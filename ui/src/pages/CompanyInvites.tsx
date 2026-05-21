@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ExternalLink, MailPlus } from "lucide-react";
 import { accessApi } from "@/api/access";
-import { agentsApi } from "@/api/agents";
 import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
@@ -57,7 +56,7 @@ export function CompanyInvites() {
   const [employeeRole, setEmployeeRole] = useState("");
   const [employeeDepartment, setEmployeeDepartment] = useState("");
   const [employeeExperienceLevel, setEmployeeExperienceLevel] = useState<"junior" | "mid" | "senior" | "lead">("mid");
-  const [managerAgentId, setManagerAgentId] = useState("");
+  const [managerMembershipId, setManagerMembershipId] = useState("");
   const [latestInviteUrl, setLatestInviteUrl] = useState<string | null>(null);
   const [latestInviteCopied, setLatestInviteCopied] = useState(false);
 
@@ -96,9 +95,9 @@ export function CompanyInvites() {
   }, [selectedCompany?.name, setBreadcrumbs]);
 
   const inviteHistoryQueryKey = queryKeys.access.invites(selectedCompanyId ?? "", "all", INVITE_HISTORY_PAGE_SIZE);
-  const agentsQuery = useQuery({
-    queryKey: queryKeys.agents.list(selectedCompanyId ?? ""),
-    queryFn: () => agentsApi.list(selectedCompanyId!),
+  const employeesQuery = useQuery({
+    queryKey: queryKeys.access.employees(selectedCompanyId ?? ""),
+    queryFn: () => accessApi.listEmployees(selectedCompanyId!),
     enabled: Boolean(selectedCompanyId) && createLinkedAssistant,
   });
   const invitesQuery = useInfiniteQuery({
@@ -120,12 +119,27 @@ export function CompanyInvites() {
     [invitesQuery.data?.pages],
   );
 
+  const reportToOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const owner of employeesQuery.data?.owners ?? []) {
+      map.set(owner.membershipId, `${owner.displayName} (CEO)`);
+    }
+    for (const employee of employeesQuery.data?.employees ?? []) {
+      if (employee.membershipStatus === "archived") continue;
+      const role = employee.role.trim() || (employee.workspaceRole === "owner" ? "CEO" : "Member");
+      map.set(employee.membershipId, `${employee.displayName} (${role})`);
+    }
+    return Array.from(map.entries())
+      .map(([membershipId, label]) => ({ membershipId, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [employeesQuery.data?.employees, employeesQuery.data?.owners]);
+
   useEffect(() => {
     if (!createLinkedAssistant) return;
-    if (!agentsQuery.data || agentsQuery.data.length === 0) return;
-    if (managerAgentId && agentsQuery.data.some((agent) => agent.id === managerAgentId)) return;
-    setManagerAgentId(agentsQuery.data[0]?.id ?? "");
-  }, [createLinkedAssistant, agentsQuery.data, managerAgentId]);
+    if (reportToOptions.length === 0) return;
+    if (managerMembershipId && reportToOptions.some((option) => option.membershipId === managerMembershipId)) return;
+    setManagerMembershipId(reportToOptions[0]?.membershipId ?? "");
+  }, [createLinkedAssistant, managerMembershipId, reportToOptions]);
 
   const createInviteMutation = useMutation({
     mutationFn: () =>
@@ -164,7 +178,7 @@ export function CompanyInvites() {
         role: employeeRole.trim(),
         department: employeeDepartment.trim() || null,
         experienceLevel: employeeExperienceLevel,
-        manager: { type: "agent", agentId: managerAgentId },
+        manager: { type: "employee", membershipId: managerMembershipId },
       }),
     onSuccess: async ({ employee }) => {
       const inviteUrl = employee.invitation?.inviteUrl ?? null;
@@ -174,7 +188,6 @@ export function CompanyInvites() {
 
       await queryClient.invalidateQueries({ queryKey: inviteHistoryQueryKey });
       await queryClient.invalidateQueries({ queryKey: queryKeys.access.employees(selectedCompanyId!) });
-      await queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
 
       pushToast({
         title: "Employee invite created",
@@ -368,24 +381,24 @@ export function CompanyInvites() {
                 </select>
               </label>
               <label className="space-y-2 text-sm">
-                <span className="font-medium">Manager</span>
+                <span className="font-medium">Report to</span>
                 <select
                   className="w-full rounded-md border border-border bg-background px-3 py-2"
-                  value={managerAgentId}
-                  onChange={(event) => setManagerAgentId(event.target.value)}
+                  value={managerMembershipId}
+                  onChange={(event) => setManagerMembershipId(event.target.value)}
                 >
-                  <option value="">Select a manager</option>
-                  {(agentsQuery.data ?? []).map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.name} ({agent.role})
+                  <option value="">Select who to report to</option>
+                  {reportToOptions.map((option) => (
+                    <option key={option.membershipId} value={option.membershipId}>
+                      {option.label}
                     </option>
                   ))}
                 </select>
               </label>
             </div>
-            {agentsQuery.data && agentsQuery.data.length === 0 ? (
+            {reportToOptions.length === 0 ? (
               <div className="text-xs text-muted-foreground">
-                Create an agent manager first so the linked assistant has a reporting line.
+                Invite users first so the linked assistant has a reporting line.
               </div>
             ) : null}
           </div>
@@ -410,7 +423,7 @@ export function CompanyInvites() {
                   !employeeDisplayName.trim() ||
                   !employeeEmail.trim() ||
                   !employeeRole.trim() ||
-                  !managerAgentId
+                  !managerMembershipId
                 : createInviteMutation.isPending
             }
           >
