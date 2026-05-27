@@ -63,7 +63,7 @@ export const projectsApi = {
     payload: { agentType: "requirement-breakdown" | "sow"; requirements: string },
     companyId?: string,
   ) =>
-    api.post<{ output: string }>(projectPath(id, companyId, "/requirement-analysis/generate"), payload),
+    api.post<{ issueId: string; identifier: string | null }>(projectPath(id, companyId, "/requirement-analysis/generate"), payload),
   saveRequirementAnalysis: (
     id: string,
     payload: { agentType: "requirement-breakdown" | "sow"; title: string; content: string },

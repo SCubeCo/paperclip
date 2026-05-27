@@ -31,6 +31,7 @@ import { Tabs } from "@/components/ui/tabs";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { PluginSlotMount, PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
 
+
 /* ── Top-level tab types ── */
 
 type ProjectBaseTab = "overview" | "list" | "plugin-operations" | "workspaces" | "configuration" | "requirement-analysis" | "budget";
@@ -139,11 +140,10 @@ function ColorPicker({
                   onSelect(color);
                   setOpen(false);
                 }}
-                className={`h-6 w-6 rounded-md cursor-pointer transition-[transform,box-shadow] duration-150 hover:scale-110 ${
-                  color === currentColor
+                className={`h-6 w-6 rounded-md cursor-pointer transition-[transform,box-shadow] duration-150 hover:scale-110 ${color === currentColor
                     ? "ring-2 ring-foreground ring-offset-1 ring-offset-background"
                     : "hover:ring-2 hover:ring-foreground/30"
-                }`}
+                  }`}
                 style={{ backgroundColor: color }}
                 aria-label={`Select color ${color}`}
               />
@@ -445,18 +445,24 @@ function RequirementAnalysisWorkspace({
     pushToast({ title: "SharePoint not configured", body: "Set up SharePoint integration in your environment settings to enable this feature.", tone: "info" });
   };
 
+  const [generatedIssueId, setGeneratedIssueId] = useState<string | null>(null);
+  const [generatedIssueIdentifier, setGeneratedIssueIdentifier] = useState<string | null>(null);
+
   const handleGenerate = async () => {
     if (!selectedAgent) return;
     setIsGenerating(true);
     setGenerateError(null);
     setOutput(null);
+    setGeneratedIssueId(null);
+    setGeneratedIssueIdentifier(null);
     try {
       const result = await projectsApi.generateRequirementAnalysis(
         projectId,
         { agentType: selectedAgent, requirements },
         companyId,
       );
-      setOutput(result.output);
+      setGeneratedIssueId(result.issueId);
+      setGeneratedIssueIdentifier(result.identifier);
       setSelectedSavedId(null);
       setIsCurrentOutputSaved(false);
       setIsOutputEdited(false);
@@ -816,6 +822,32 @@ function RequirementAnalysisWorkspace({
             </div>
           </div>
 
+          {/* Generated issue banner */}
+          {generatedIssueId && !output && !isGenerating && (
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <svg className="h-4 w-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="text-sm font-medium text-emerald-600 dark:text-emerald-400">Generation started</span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                The {selectedAgent === "sow" ? "SOW" : "requirement breakdown"} has been dispatched to the lead agent.
+                Track progress and view the output at{" "}
+                <Link
+                  to={`/projects/${projectId}/issues/${generatedIssueIdentifier ?? generatedIssueId}`}
+                  className="text-primary underline underline-offset-2 hover:text-primary/80"
+                >
+                  {generatedIssueIdentifier ?? generatedIssueId.slice(0, 8)}
+                </Link>
+                .
+              </p>
+              <p className="text-xs text-muted-foreground">
+                When the agent completes the document, copy the result back here and save it.
+              </p>
+            </div>
+          )}
+
           {/* Output section */}
           {output !== null && (
             <>
@@ -977,71 +1009,67 @@ function RequirementAnalysisWorkspace({
 
               {/* SOW Tracker — only for SOW agent */}
               {selectedAgent === "sow" && (
-              <div className="rounded-lg border border-border bg-card p-5 space-y-4">
-                <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-semibold">SOW Tracker</h3>
-                  <span className="rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
-                    {getSowTrackerItems.filter((i) => i.status === "done").length}/
-                    {getSowTrackerItems.length} complete
-                  </span>
-                </div>
+                <div className="rounded-lg border border-border bg-card p-5 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-semibold">SOW Tracker</h3>
+                    <span className="rounded-full border border-border bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
+                      {getSowTrackerItems.filter((i) => i.status === "done").length}/
+                      {getSowTrackerItems.length} complete
+                    </span>
+                  </div>
 
-                <div className="space-y-0.5">
-                  {getSowTrackerItems.map((item, idx) => (
-                    <div key={item.label} className="flex items-stretch gap-3">
-                      {/* Timeline spine */}
-                      <div className="flex flex-col items-center">
-                        <div
-                          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold ${
-                            item.status === "done"
-                              ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-400"
-                              : item.status === "pending"
-                              ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
-                              : "border-violet-500/30 bg-violet-500/10 text-violet-400"
-                          }`}
-                        >
-                          {item.status === "done" ? (
-                            <svg
-                              className="h-3 w-3"
-                              fill="none"
-                              viewBox="0 0 24 24"
-                              stroke="currentColor"
-                              strokeWidth={2.5}
-                            >
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                            </svg>
-                          ) : (
-                            <span>{idx + 1}</span>
+                  <div className="space-y-0.5">
+                    {getSowTrackerItems.map((item, idx) => (
+                      <div key={item.label} className="flex items-stretch gap-3">
+                        {/* Timeline spine */}
+                        <div className="flex flex-col items-center">
+                          <div
+                            className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold ${item.status === "done"
+                                ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-400"
+                                : item.status === "pending"
+                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                                  : "border-violet-500/30 bg-violet-500/10 text-violet-400"
+                              }`}
+                          >
+                            {item.status === "done" ? (
+                              <svg
+                                className="h-3 w-3"
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                                strokeWidth={2.5}
+                              >
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                              </svg>
+                            ) : (
+                              <span>{idx + 1}</span>
+                            )}
+                          </div>
+                          {idx < getSowTrackerItems.length - 1 && (
+                            <div
+                              className={`my-0.5 w-px flex-1 ${item.status === "done" ? "bg-emerald-500/30" : "bg-border"
+                                }`}
+                            />
                           )}
                         </div>
-                        {idx < getSowTrackerItems.length - 1 && (
-                          <div
-                            className={`my-0.5 w-px flex-1 ${
-                              item.status === "done" ? "bg-emerald-500/30" : "bg-border"
-                            }`}
-                          />
-                        )}
-                      </div>
 
-                      {/* Row content */}
-                      <div
-                        className={`flex flex-1 items-center justify-between gap-2 rounded-md px-2 py-2 transition-colors hover:bg-muted/60 ${
-                          idx < getSowTrackerItems.length - 1 ? "mb-0.5" : ""
-                        }`}
-                      >
-                        <span
-                          className={`text-sm ${
-                            item.status === "done" ? "text-foreground" : "text-muted-foreground"
-                          }`}
+                        {/* Row content */}
+                        <div
+                          className={`flex flex-1 items-center justify-between gap-2 rounded-md px-2 py-2 transition-colors hover:bg-muted/60 ${idx < getSowTrackerItems.length - 1 ? "mb-0.5" : ""
+                            }`}
                         >
-                          {item.label}
-                        </span>
-                        <TrackerStatusChip status={item.status} />
+                          <span
+                            className={`text-sm ${item.status === "done" ? "text-foreground" : "text-muted-foreground"
+                              }`}
+                          >
+                            {item.label}
+                          </span>
+                          <TrackerStatusChip status={item.status} />
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
-              </div>
               )}
             </>
           )}
@@ -1363,7 +1391,7 @@ export function ProjectDetail() {
   if (routeProjectRef && activeTab === null) {
     let cachedTab: string | null = null;
     if (project?.id) {
-      try { cachedTab = localStorage.getItem(`paperclip:project-tab:${project.id}`); } catch {}
+      try { cachedTab = localStorage.getItem(`paperclip:project-tab:${project.id}`); } catch { }
     }
     if (cachedTab === "overview") {
       return <Navigate to={`/projects/${canonicalProjectRef}/overview`} replace />;
@@ -1399,7 +1427,7 @@ export function ProjectDetail() {
   const handleTabChange = (tab: ProjectTab) => {
     // Cache the active tab per project
     if (project?.id) {
-      try { localStorage.setItem(`paperclip:project-tab:${project.id}`, tab); } catch {}
+      try { localStorage.setItem(`paperclip:project-tab:${project.id}`, tab); } catch { }
     }
     if (isProjectPluginTab(tab)) {
       navigate(`/projects/${canonicalProjectRef}?tab=${encodeURIComponent(tab)}`);
