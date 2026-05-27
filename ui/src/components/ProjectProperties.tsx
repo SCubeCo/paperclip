@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Project } from "@paperclipai/shared";
 import { StatusBadge } from "./StatusBadge";
 import { cn, formatDate } from "../lib/utils";
+import { agentsApi } from "../api/agents";
 import { environmentsApi } from "../api/environments";
 import { goalsApi } from "../api/goals";
 import { instanceSettingsApi } from "../api/instanceSettings";
@@ -15,6 +16,7 @@ import { statusBadge, statusBadgeDefault } from "../lib/status-colors";
 import { Separator } from "@/components/ui/separator";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AlertCircle, Archive, ArchiveRestore, Check, ExternalLink, Github, Loader2, Plus, Trash2, X } from "lucide-react";
 import { ChoosePathButton } from "./PathInstructionsModal";
@@ -56,7 +58,8 @@ export type ProjectConfigFieldKey =
   | "execution_workspace_branch_template"
   | "execution_workspace_worktree_parent_dir"
   | "execution_workspace_provision_command"
-  | "execution_workspace_teardown_command";
+  | "execution_workspace_teardown_command"
+  | "lead_agent";
 
 function SaveIndicator({ state }: { state: ProjectFieldSaveState }) {
   if (state === "saving") {
@@ -311,6 +314,11 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
     retry: false,
   });
   const environmentsEnabled = experimentalSettings?.enableEnvironments === true;
+  const { data: agents } = useQuery({
+    queryKey: queryKeys.agents.list(selectedCompanyId!),
+    queryFn: () => agentsApi.list(selectedCompanyId!),
+    enabled: !!selectedCompanyId,
+  });
   const { data: availableSecrets = [] } = useQuery({
     queryKey: selectedCompanyId ? queryKeys.secrets.list(selectedCompanyId) : ["secrets", "none"],
     queryFn: () => secretsApi.list(selectedCompanyId!),
@@ -638,11 +646,32 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
             </span>
           )}
         </PropertyRow>
-        {project.leadAgentId && (
-          <PropertyRow label="Lead">
-            <span className="text-sm font-mono">{project.leadAgentId.slice(0, 8)}</span>
-          </PropertyRow>
-        )}
+        <PropertyRow label={<FieldLabel label="Lead Agent" state={fieldState("lead_agent")} />}>
+          {onUpdate || onFieldUpdate ? (
+            <Select
+              value={project.leadAgentId ?? "none"}
+              onValueChange={(val) => commitField("lead_agent", { leadAgentId: val === "none" ? null : val })}
+            >
+              <SelectTrigger className="h-8 w-[280px]">
+                <SelectValue placeholder="Select agent..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="none">None</SelectItem>
+                {(agents ?? []).map((agent) => (
+                  <SelectItem key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : (
+            <span className="text-sm text-muted-foreground">
+              {project.leadAgentId
+                ? (agents ?? []).find((a) => a.id === project.leadAgentId)?.name ?? project.leadAgentId.slice(0, 8)
+                : "Not set"}
+            </span>
+          )}
+        </PropertyRow>
         <PropertyRow
           label={<FieldLabel label="Goals" state={fieldState("goals")} />}
           alignStart

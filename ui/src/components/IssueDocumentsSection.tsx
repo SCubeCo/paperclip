@@ -96,7 +96,7 @@ function downloadDocumentFile(key: string, body: string) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `${key}.md`;
+  anchor.download = `${key}.docx`;
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
@@ -925,7 +925,7 @@ export function IssueDocumentsSection({
                         <MoreHorizontal className="h-3.5 w-3.5" />
                       </Button>
                     </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
+                    <DropdownMenuContent align="end">
                       {!isHistoricalPreview ? (
                         <DropdownMenuItem onClick={() => beginEdit(doc.key)}>
                           <FilePenLine className="h-3.5 w-3.5" />
@@ -965,17 +965,17 @@ export function IssueDocumentsSection({
                   className="mt-3 space-y-3"
                   onBlurCapture={!isHistoricalPreview
                     ? async (event) => {
-                        if (activeDraft) {
-                          await handleDraftBlur(event);
-                        }
+                      if (activeDraft) {
+                        await handleDraftBlur(event);
                       }
+                    }
                     : undefined}
                   onKeyDown={!isHistoricalPreview
                     ? async (event) => {
-                        if (activeDraft) {
-                          await handleDraftKeyDown(event);
-                        }
+                      if (activeDraft) {
+                        await handleDraftKeyDown(event);
                       }
+                    }
                     : undefined}
                 >
                   {isHistoricalPreview && selectedHistoricalRevision && (
@@ -1085,9 +1085,8 @@ export function IssueDocumentsSection({
                     />
                   )}
                   <div
-                    className={`${documentBodyShellClassName} ${
-                      activeDraft || isHistoricalPreview ? "" : "rounded-md hover:bg-accent/10"
-                    }`}
+                    className={`${documentBodyShellClassName} ${activeDraft || isHistoricalPreview ? "" : "rounded-md hover:bg-accent/10"
+                      }`}
                   >
                     {isHistoricalPreview ? (
                       renderFoldableBody(displayedBody, documentBodyContentClassName)
@@ -1117,30 +1116,29 @@ export function IssueDocumentsSection({
                   </div>
                   <div className="flex min-h-4 items-center justify-end px-1">
                     <span
-                      className={`text-[11px] transition-opacity duration-150 ${
-                        isHistoricalPreview
-                          ? "text-amber-300"
-                          : activeConflict
+                      className={`text-[11px] transition-opacity duration-150 ${isHistoricalPreview
+                        ? "text-amber-300"
+                        : activeConflict
                           ? "text-amber-300"
                           : autosaveState === "error"
                             ? "text-destructive"
                             : "text-muted-foreground"
-                      } ${activeDraft || isHistoricalPreview ? "opacity-100" : "opacity-0"}`}
+                        } ${activeDraft || isHistoricalPreview ? "opacity-100" : "opacity-0"}`}
                     >
                       {isHistoricalPreview
                         ? "Viewing historical revision"
                         : activeDraft
                           ? activeConflict
-                          ? "Out of date"
-                          : autosaveDocumentKey === doc.key
-                            ? autosaveState === "saving"
-                              ? "Autosaving..."
-                              : autosaveState === "saved"
-                                ? "Saved"
-                                : autosaveState === "error"
-                                  ? "Could not save"
-                                  : ""
-                            : ""
+                            ? "Out of date"
+                            : autosaveDocumentKey === doc.key
+                              ? autosaveState === "saving"
+                                ? "Autosaving..."
+                                : autosaveState === "saved"
+                                  ? "Saved"
+                                  : autosaveState === "error"
+                                    ? "Could not save"
+                                    : ""
+                              : ""
                           : ""}
                     </span>
                   </div>

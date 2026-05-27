@@ -1,8 +1,8 @@
 import { Router, type Request, type Response } from "express";
 import { randomUUID } from "crypto";
-import { and, eq, desc as descOrd } from "drizzle-orm";
+import { and, eq, ne, desc as descOrd } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { projectRequirementAnalyses, projectRequirementAnalysisShares } from "@paperclipai/db";
+import { agents, projectRequirementAnalyses, projectRequirementAnalysisShares, workspaceOperations } from "@paperclipai/db";
 import {
   createProjectSchema,
   createProjectWorkspaceSchema,
@@ -16,7 +16,7 @@ import {
 import type { WorkspaceRuntimeDesiredState, WorkspaceRuntimeServiceStateMap } from "@paperclipai/shared";
 import { trackProjectCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
-import { projectService, logActivity, workspaceOperationService } from "../services/index.js";
+import { projectService, logActivity, workspaceOperationService, issueService, heartbeatService } from "../services/index.js";
 import { conflict, forbidden } from "../errors.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import {
@@ -157,9 +157,9 @@ export function projectRoutes(db: Db) {
   const router = Router();
   const svc = projectService(db);
   const secretsSvc = secretService(db);
-  const workspaceOperations = workspaceOperationService(db);
-  const strictSecretsMode = process.env.PAPERCLIP_SECRETS_STRICT_MODE === "true";
   const environmentsSvc = environmentService(db);
+  const heartbeat = heartbeatService(db);
+  const issueSvc = issueService(db);
 
   async function assertProjectEnvironmentSelection(companyId: string, environmentId: string | null | undefined) {
     if (environmentId === undefined || environmentId === null) return;
@@ -253,7 +253,7 @@ export function projectRoutes(db: Db) {
       projectData.env = await secretsSvc.normalizeEnvBindingsForPersistence(
         companyId,
         projectData.env,
-        { strictMode: strictSecretsMode, fieldPath: "env" },
+        { strictMode: true, fieldPath: "env" },
       );
     }
     const project = await svc.create(companyId, projectData);
@@ -320,7 +320,7 @@ export function projectRoutes(db: Db) {
     }
     if (body.env !== undefined) {
       body.env = await secretsSvc.normalizeEnvBindingsForPersistence(existing.companyId, body.env, {
-        strictMode: strictSecretsMode,
+        strictMode: true,
         fieldPath: "env",
       });
     }
@@ -545,7 +545,7 @@ export function projectRoutes(db: Db) {
     }
 
     const actor = getActorInfo(req);
-    const recorder = workspaceOperations.createRecorder({ companyId: project.companyId });
+    const recorder = workspaceOperationService(db).createRecorder({ companyId: project.companyId });
     let runtimeServiceCount = workspace.runtimeServices?.length ?? 0;
     let stdout = "";
     let stderr = "";
@@ -732,7 +732,7 @@ export function projectRoutes(db: Db) {
   router.post("/projects/:id/workspaces/:workspaceId/runtime-services/:action", validate(workspaceRuntimeControlTargetSchema), handleProjectWorkspaceRuntimeCommand);
   router.post("/projects/:id/workspaces/:workspaceId/runtime-commands/:action", validate(workspaceRuntimeControlTargetSchema), handleProjectWorkspaceRuntimeCommand);
 
-  // ── Requirement Analysis AI generation ──
+  // ── Requirement Analysis — dispatch to lead agent ──
   router.post("/projects/:id/requirement-analysis/generate", async (req, res) => {
     const id = req.params.id as string;
     const project = await svc.getById(id);
@@ -753,102 +753,67 @@ export function projectRoutes(db: Db) {
     const agentType = body.agentType as "requirement-breakdown" | "sow";
     const requirements = (body.requirements as string).trim();
 
-    const systemPrompts: Record<"requirement-breakdown" | "sow", string> = {
-      "requirement-breakdown": `You are an expert business analyst. Given project requirements, produce a structured requirement breakdown in Word-document style plain text (not Markdown). Include: Executive Summary, Functional Requirements (numbered list), Non-Functional Requirements, Constraints & Assumptions, Acceptance Criteria, and Open Questions. Be concise, clear, and professional.`,
-      sow: `You are an expert technical writer and project manager. Given project requirements, produce a professional Statement of Work (SOW) in Word-document style plain text (not Markdown). Include: Executive Summary, Project Scope (in/out of scope), Deliverables (with owner and due date), Timeline, Team & Responsibilities, Risks & Mitigations, Acceptance Criteria, and Payment/Approval Terms. Write in formal enterprise style.`,
-    };
+    let leadAgent: typeof agents.$inferSelect | undefined;
 
-    const systemPrompt = systemPrompts[agentType];
-    const userMessage = requirements.length > 0
-      ? `Project: ${project.name}\n\nRequirements:\n${requirements}`
-      : `Project: ${project.name}\n\nGenerate a template-based document for this project.`;
+    if (project.leadAgentId) {
+      [leadAgent] = await db
+        .select()
+        .from(agents)
+        .where(eq(agents.id, project.leadAgentId))
+        .limit(1);
+    }
+
+    if (!leadAgent) {
+      [leadAgent] = await db
+        .select()
+        .from(agents)
+        .where(and(eq(agents.companyId, project.companyId), ne(agents.status, "terminated")))
+        .limit(1);
+    }
+
+    if (!leadAgent) {
+      res.status(422).json({ error: "No active agent found in this company. Create an agent first." });
+      return;
+    }
 
     const actor = getActorInfo(req);
-    const resolvedProjectEnv = await secretsSvc.resolveEnvBindings(
-      project.companyId,
-      project.env ?? {},
-      {
-        consumerType: "project",
-        consumerId: project.id,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        heartbeatRunId: actor.runId,
+    const title = agentType === "sow"
+      ? `SOW: ${project.name}`
+      : `Requirements Breakdown: ${project.name}`;
+    const docType = agentType === "sow" ? "Statement of Work" : "Requirements Breakdown";
+    const description = `Generate a ${docType} for project **${project.name}**.\n\n## Requirements\n\n${requirements}\n\nOnce complete, save the output using the "save" endpoint.`;
+
+    const issue = await issueSvc.create(project.companyId, {
+      title,
+      description,
+      projectId: project.id,
+      assigneeAgentId: leadAgent.id,
+      status: "todo",
+      priority: "high",
+      createdByAgentId: actor.agentId,
+      createdByUserId: actor.actorType === "user" ? actor.actorId : null,
+      originKind: "automation",
+    });
+
+    await heartbeat.wakeup(leadAgent.id, {
+      source: "on_demand",
+      triggerDetail: "system",
+      reason: "requirement_analysis",
+      payload: {
+        agentType,
+        requirements,
+        projectId: project.id,
       },
-    );
+      requestedByActorType: actor.actorType,
+      requestedByActorId: actor.actorId ?? null,
+      contextSnapshot: {
+        issueId: issue.id,
+        taskId: issue.id,
+        wakeReason: "requirement_analysis",
+      },
+    });
 
-    const anthropicKey = (resolvedProjectEnv.env.ANTHROPIC_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? "").trim();
-    const openaiKey = (resolvedProjectEnv.env.OPENAI_API_KEY ?? process.env.OPENAI_API_KEY ?? "").trim();
-
-    if (!anthropicKey && !openaiKey) {
-      res.status(422).json({
-        error: "No AI provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY in project env or server environment.",
-      });
-      return;
-    }
-
-    let output: string;
-
-    if (anthropicKey) {
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": anthropicKey,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "claude-haiku-4-5",
-          max_tokens: 4096,
-          system: systemPrompt,
-          messages: [{ role: "user", content: userMessage }],
-        }),
-      });
-
-      if (!response.ok) {
-        const errBody = await response.text().catch(() => "");
-        res.status(502).json({ error: `Anthropic API error (${response.status})`, detail: errBody });
-        return;
-      }
-
-      const data = await response.json() as {
-        content?: Array<{ type: string; text: string }>;
-      };
-      output = data.content?.find((b) => b.type === "text")?.text ?? "";
-    } else {
-      const response = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${openaiKey}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          max_tokens: 4096,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userMessage },
-          ],
-        }),
-      });
-
-      if (!response.ok) {
-        const errBody = await response.text().catch(() => "");
-        res.status(502).json({ error: `OpenAI API error (${response.status})`, detail: errBody });
-        return;
-      }
-
-      const data = await response.json() as {
-        choices?: Array<{ message?: { content?: string } }>;
-      };
-      output = data.choices?.[0]?.message?.content ?? "";
-    }
-
-    if (!output) {
-      res.status(502).json({ error: "AI provider returned an empty response" });
-      return;
-    }
-
-    res.json({ output });
+    res.json({ issueId: issue.id, identifier: issue.identifier ?? null });
   });
 
   // ── Requirement Analysis — save ──
