@@ -3,6 +3,26 @@ type OnboardingRouteCompany = {
   issuePrefix: string;
 };
 
+export function resolveDirectOnboardingRedirect(params: {
+  pathname: string;
+  companyPrefix?: string;
+  companies: OnboardingRouteCompany[];
+  selectedCompanyId?: string | null;
+}): string | null {
+  if (!isOnboardingPath(params.pathname)) return null;
+  if (params.companyPrefix) return null;
+  if (params.companies.length === 0) return null;
+
+  const preferredCompany = params.selectedCompanyId
+    ? params.companies.find((company) => company.id === params.selectedCompanyId) ?? null
+    : null;
+  const targetCompany = preferredCompany ?? params.companies[0] ?? null;
+
+  if (!targetCompany) return null;
+
+  return `/${targetCompany.issuePrefix}/dashboard`;
+}
+
 export function isOnboardingPath(pathname: string): boolean {
   const segments = pathname.split("/").filter(Boolean);
 

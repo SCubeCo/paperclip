@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isOnboardingPath,
+  resolveDirectOnboardingRedirect,
   resolveRouteOnboardingOptions,
   shouldRedirectCompanylessRouteToOnboarding,
 } from "./onboarding-route";
@@ -47,6 +48,49 @@ describe("resolveRouteOnboardingOptions", () => {
         companies: [],
       }),
     ).toEqual({ initialStep: 1 });
+  });
+});
+
+describe("resolveDirectOnboardingRedirect", () => {
+  it("redirects global onboarding to the selected company dashboard", () => {
+    expect(
+      resolveDirectOnboardingRedirect({
+        pathname: "/onboarding",
+        companies: [
+          { id: "company-1", issuePrefix: "PAP" },
+          { id: "company-2", issuePrefix: "OPS" },
+        ],
+        selectedCompanyId: "company-2",
+      }),
+    ).toBe("/OPS/dashboard");
+  });
+
+  it("redirects global onboarding to the first company when no selection exists", () => {
+    expect(
+      resolveDirectOnboardingRedirect({
+        pathname: "/onboarding",
+        companies: [{ id: "company-1", issuePrefix: "PAP" }],
+      }),
+    ).toBe("/PAP/dashboard");
+  });
+
+  it("does not redirect prefixed onboarding routes", () => {
+    expect(
+      resolveDirectOnboardingRedirect({
+        pathname: "/pap/onboarding",
+        companyPrefix: "pap",
+        companies: [{ id: "company-1", issuePrefix: "PAP" }],
+      }),
+    ).toBeNull();
+  });
+
+  it("does not redirect when there are no companies", () => {
+    expect(
+      resolveDirectOnboardingRedirect({
+        pathname: "/onboarding",
+        companies: [],
+      }),
+    ).toBeNull();
   });
 });
 

@@ -56,7 +56,10 @@ import { NotFoundPage } from "./pages/NotFound";
 import { useCompany } from "./context/CompanyContext";
 import { useDialogActions } from "./context/DialogContext";
 import { loadLastInboxTab } from "./lib/inbox";
-import { shouldRedirectCompanylessRouteToOnboarding } from "./lib/onboarding-route";
+import {
+  resolveDirectOnboardingRedirect,
+  shouldRedirectCompanylessRouteToOnboarding,
+} from "./lib/onboarding-route";
 
 function boardRoutes() {
   return (
@@ -151,9 +154,21 @@ function LegacySettingsRedirect() {
 }
 
 function OnboardingRoutePage() {
-  const { companies } = useCompany();
+  const location = useLocation();
+  const { companies, selectedCompany } = useCompany();
   const { openOnboarding } = useDialogActions();
   const { companyPrefix } = useParams<{ companyPrefix?: string }>();
+  const directOnboardingRedirectTarget = resolveDirectOnboardingRedirect({
+    pathname: location.pathname,
+    companyPrefix,
+    companies,
+    selectedCompanyId: selectedCompany?.id ?? null,
+  });
+
+  if (directOnboardingRedirectTarget) {
+    return <Navigate to={directOnboardingRedirectTarget} replace />;
+  }
+
   const matchedCompany = companyPrefix
     ? companies.find((company) => company.issuePrefix.toUpperCase() === companyPrefix.toUpperCase()) ?? null
     : null;
