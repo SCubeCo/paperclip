@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { accessApi } from "../api/access";
 import { useCompany } from "../context/CompanyContext";
 import { useDialogActions } from "../context/DialogContext";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
@@ -44,6 +45,13 @@ export function Companies() {
     queryKey: queryKeys.companies.stats,
     queryFn: () => companiesApi.stats(),
   });
+  const { data: boardAccess } = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: () => accessApi.getCurrentBoardAccess(),
+    retry: false,
+  });
+  const canCreateCompany = boardAccess?.canCreateCompany ?? true;
+  const onboardingMode = !canCreateCompany && selectedCompanyId ? "agent" : "company";
 
   // Inline edit state
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -87,12 +95,20 @@ export function Companies() {
     setEditName("");
   }
 
+  function handlePrimaryAction() {
+    if (onboardingMode === "agent" && selectedCompanyId) {
+      openOnboarding({ initialStep: 2, companyId: selectedCompanyId });
+      return;
+    }
+    openOnboarding();
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-end">
-        <Button size="sm" onClick={() => openOnboarding()}>
+        <Button size="sm" onClick={handlePrimaryAction}>
           <Plus className="h-3.5 w-3.5 mr-1.5" />
-          New Company
+          {onboardingMode === "agent" ? "Add Agent" : "New Company"}
         </Button>
       </div>
 

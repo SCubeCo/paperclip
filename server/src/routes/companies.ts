@@ -267,10 +267,6 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/", validate(createCompanySchema), async (req, res) => {
     assertBoard(req);
-    const canCreateFirstWorkspace = (req.actor.companyIds?.length ?? 0) === 0;
-    if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin || canCreateFirstWorkspace)) {
-      throw forbidden("Instance admin required");
-    }
     const company = await svc.create(req.body);
     const ownerUserId = req.actor.userId ?? "local-board";
     await access.ensureMembership(company.id, "user", ownerUserId, "owner", "active");

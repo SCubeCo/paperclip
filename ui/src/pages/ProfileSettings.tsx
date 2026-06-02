@@ -145,7 +145,10 @@ export function ProfileSettings() {
     : "Select a company to upload an avatar into Paperclip storage.";
   const currentEmployee =
     employeesQuery.data?.employees.find((employee) => employee.memberUser?.id === sessionQuery.data?.user.id) ?? null;
-  const linkedAgent = currentEmployee?.personalAgent ?? null;
+  const currentOwner =
+    employeesQuery.data?.owners.find((owner) => owner.principalId === sessionQuery.data?.user.id) ?? null;
+  const linkedAgent = currentEmployee?.personalAgent ?? currentOwner?.personalAgent ?? null;
+  const hasCompanyMembership = Boolean(currentEmployee || currentOwner);
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -250,9 +253,9 @@ export function ProfileSettings() {
                               Role: {linkedAgent.role} · Status: {linkedAgent.status ?? "unknown"}
                             </p>
                           </>
-                        ) : currentEmployee ? (
+                        ) : hasCompanyMembership ? (
                           <p className="text-sm text-muted-foreground">
-                            Your company profile exists, but no linked agent is assigned yet.
+                            Your company access exists, but no linked agent is assigned yet.
                           </p>
                         ) : (
                           <p className="text-sm text-muted-foreground">

@@ -3602,7 +3602,7 @@ export function accessRoutes(
       userId: req.actor.userId,
       isInstanceAdmin: accessSnapshot.isInstanceAdmin,
       companyIds: accessSnapshot.companyIds,
-      canCreateCompany: accessSnapshot.isInstanceAdmin || accessSnapshot.companyIds.length === 0,
+      canCreateCompany: true,
       memberships: accessSnapshot.memberships,
       source: req.actor.source ?? "none",
       keyId: req.actor.source === "board_key" ? req.actor.keyId ?? null : null,
@@ -4875,9 +4875,10 @@ export function accessRoutes(
   router.get("/companies/:companyId/employees", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const [employees, currentAccess, owners] = await Promise.all([
+    const [employees, currentAccess, ownerCeoAgent, owners] = await Promise.all([
       loadEmployeeRecords(db, companyId),
       loadCompanyAccessSummary(req, access, companyId),
+      findCompanyCeoAgent(db, companyId),
       db
         .select({
           membershipId: companyMemberships.id,
@@ -4899,9 +4900,19 @@ export function accessRoutes(
         .then((rows) =>
           rows.map((row) => ({
             membershipId: row.membershipId,
+            principalId: row.principalId,
             displayName:
               row.userName?.trim() || row.userEmail?.trim() || row.principalId,
             status: row.status,
+            personalAgent: ownerCeoAgent
+              ? {
+                id: ownerCeoAgent.id,
+                name: ownerCeoAgent.name,
+                role: ownerCeoAgent.role,
+                status: ownerCeoAgent.status,
+                reportsTo: ownerCeoAgent.reportsTo,
+              }
+              : null,
           })),
         ),
     ]);

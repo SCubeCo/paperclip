@@ -117,6 +117,7 @@ describe("ProfileSettings", () => {
           updatedAt: "2026-05-21T00:00:00.000Z",
         },
       ],
+      owners: [],
       access: {
         canCreateEmployees: false,
         canInviteUsers: false,
@@ -179,6 +180,56 @@ describe("ProfileSettings", () => {
       name: "Jane Example",
       image: "/api/assets/asset-1/content",
     });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("shows the CEO linked agent for owner memberships without an employee profile", async () => {
+    mockAccessApi.listEmployees.mockResolvedValueOnce({
+      employees: [],
+      owners: [
+        {
+          membershipId: "membership-owner-1",
+          principalId: "user-1",
+          displayName: "Jane Example",
+          status: "active",
+          personalAgent: {
+            id: "ceo-1",
+            name: "CEO",
+            role: "ceo",
+            status: "active",
+            reportsTo: null,
+          },
+        },
+      ],
+      access: {
+        canCreateEmployees: false,
+        canInviteUsers: false,
+        canManageMembers: false,
+      },
+    });
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <ProfileSettings />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("Linked agent");
+    expect(container.textContent).toContain("Your company profile is linked to CEO.");
+    expect(container.textContent).toContain("Role: ceo · Status: active");
+    expect(container.textContent).not.toContain("You do not currently have an employee profile in this company.");
 
     await act(async () => {
       root.unmount();

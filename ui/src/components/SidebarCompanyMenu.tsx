@@ -23,6 +23,7 @@ import { CSS } from "@dnd-kit/utilities";
 import type { Company } from "@paperclipai/shared";
 import { Link, useLocation, useNavigate } from "@/lib/router";
 import { authApi } from "@/api/auth";
+import { accessApi } from "@/api/access";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -156,6 +157,13 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
     queryFn: () => authApi.getSession(),
     retry: false,
   });
+  const { data: boardAccess } = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: () => accessApi.getCurrentBoardAccess(),
+    retry: false,
+  });
+  const canCreateCompany = boardAccess?.canCreateCompany ?? true;
+  const onboardingMode = !canCreateCompany && selectedCompany ? "agent" : "company";
   const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
   const { orderedCompanies, persistOrder } = useCompanyOrder({
     companies: sidebarCompanies,
@@ -201,6 +209,10 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
   function addCompany() {
     setOpen(false);
     if (isMobile) setSidebarOpen(false);
+    if (onboardingMode === "agent" && selectedCompany) {
+      openOnboarding({ initialStep: 2, companyId: selectedCompany.id });
+      return;
+    }
     openOnboarding();
   }
 
@@ -285,7 +297,7 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
           disabled={isEditingOrder}
         >
           <Plus className="size-4" />
-          <span>Add company...</span>
+          <span>{onboardingMode === "agent" ? "Add agent..." : "Add company..."}</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem asChild disabled={isEditingOrder}>
