@@ -69,6 +69,7 @@ export function NewAgent() {
   const [reportsTo, setReportsTo] = useState<string | null>(null);
   const [configValues, setConfigValues] = useState<CreateConfigValues>(defaultCreateValues);
   const [selectedSkillKeys, setSelectedSkillKeys] = useState<string[]>([]);
+  const [instructionsGithubUrl, setInstructionsGithubUrl] = useState("");
   const [roleOpen, setRoleOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [testAgentAction, setTestAgentAction] = useState<(() => void) | null>(null);
@@ -154,6 +155,7 @@ export function NewAgent() {
         title,
         reportsTo,
         selectedSkillKeys,
+        instructionsGithubUrl,
         configValues,
         adapterConfig: buildAdapterConfig(),
       }),
@@ -265,6 +267,24 @@ export function NewAgent() {
           onTestActionStateChange={handleTestAgentStateChange}
           onTestFeedbackChange={handleTestAgentFeedbackChange}
         />
+
+        <div className="border-t border-border px-4 py-4">
+          <div className="space-y-2">
+            <h2 className="text-sm font-medium">Instructions source (optional)</h2>
+            <p className="text-xs text-muted-foreground">
+              Paste a GitHub repo/tree/blob URL to import agent instructions into this agent at creation time.
+            </p>
+            <input
+              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm font-mono outline-none placeholder:text-muted-foreground/40"
+              placeholder="https://github.com/owner/repo/tree/main/.claude"
+              value={instructionsGithubUrl}
+              onChange={(event) => setInstructionsGithubUrl(event.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">
+              Use this when the Paperclip server cannot access local folders directly.
+            </p>
+          </div>
+        </div>
 
         <div className="border-t border-border px-4 py-4">
           <div className="space-y-3">

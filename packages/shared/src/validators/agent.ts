@@ -71,6 +71,7 @@ export const createAgentSchema = z.object({
   reportsTo: z.string().uuid().optional().nullable(),
   capabilities: z.string().optional().nullable(),
   desiredSkills: z.array(z.string().min(1)).optional(),
+  instructionsGithubUrl: z.string().url().optional(),
   adapterType: agentAdapterTypeSchema,
   adapterConfig: adapterConfigSchema.optional().default({}),
   instructionsBundle: createAgentInstructionsBundleSchema.optional(),

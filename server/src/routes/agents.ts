@@ -96,12 +96,16 @@ import {
   loadDefaultAgentInstructionsBundle,
   resolveDefaultAgentInstructionsBundleRole,
 } from "../services/default-agent-instructions.js";
+import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "../services/github-fetch.js";
 import { getTelemetryClient } from "../telemetry.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { recoveryService } from "../services/recovery/service.js";
 
 const RUN_LOG_DEFAULT_LIMIT_BYTES = 256_000;
 const RUN_LOG_MAX_LIMIT_BYTES = 1024 * 1024;
+const GITHUB_INSTRUCTIONS_MAX_FILES = 120;
+const GITHUB_INSTRUCTIONS_MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+const GITHUB_INSTRUCTIONS_ENTRY_CANDIDATES = ["AGENTS.md", "CLAUDE.md", "README.md"];
 
 function readRunLogLimitBytes(value: unknown) {
   const parsed = Number(value ?? RUN_LOG_DEFAULT_LIMIT_BYTES);
@@ -114,6 +118,355 @@ function readLiveRunsQueryInt(value: unknown, max: number, fallback = 0) {
   if (!Number.isFinite(parsed)) return fallback;
   if (parsed <= 0) return fallback;
   return Math.min(max, Math.trunc(parsed));
+}
+
+function asNonEmptyStringGlobal(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function normalizeGitHubInstructionsPath(value: string | null | undefined) {
+  if (!value) return "";
+  const normalized = path.posix
+    .normalize(value.trim().replace(/\\/g, "/"))
+    .replace(/^\/+|\/+$/g, "");
+  if (!normalized || normalized === ".") return "";
+  if (normalized === ".." || normalized.startsWith("../")) {
+    throw unprocessable("GitHub instructions path must stay within the repository");
+  }
+  return normalized;
+}
+
+type ParsedGitHubInstructionsSource = {
+  hostname: string;
+  owner: string;
+  repo: string;
+  ref: string | null;
+  sourcePath: string;
+  kind: "repo" | "tree" | "blob";
+};
+
+type GitHubTokenResolution = {
+  token: string | null;
+  source: string;
+};
+
+function normalizeGitHubTokenForAuthorization(value: unknown): string | null {
+  const raw = asNonEmptyStringGlobal(value);
+  if (!raw) return null;
+  const withoutScheme = raw
+    .replace(/^bearer\s+/i, "")
+    .replace(/^token\s+/i, "")
+    .trim();
+  return withoutScheme.length > 0 ? withoutScheme : null;
+}
+
+function parseGitHubInstructionsSource(rawUrl: string): ParsedGitHubInstructionsSource {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw unprocessable("Invalid GitHub URL");
+  }
+  if (url.protocol !== "https:") {
+    throw unprocessable("GitHub instructions URL must use HTTPS");
+  }
+
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (parts.length < 2) {
+    throw unprocessable("Invalid GitHub URL");
+  }
+
+  const owner = parts[0]!;
+  const repo = parts[1]!.replace(/\.git$/i, "");
+  const queryRef = url.searchParams.get("ref")?.trim() || null;
+  const queryPath = normalizeGitHubInstructionsPath(url.searchParams.get("path"));
+
+  if (queryRef || queryPath) {
+    return {
+      hostname: url.hostname,
+      owner,
+      repo,
+      ref: queryRef,
+      sourcePath: queryPath,
+      kind: queryPath ? "tree" : "repo",
+    };
+  }
+
+  if (parts[2] === "blob") {
+    const blobPath = normalizeGitHubInstructionsPath(parts.slice(4).join("/"));
+    if (!blobPath) {
+      throw unprocessable("Invalid GitHub blob URL");
+    }
+    return {
+      hostname: url.hostname,
+      owner,
+      repo,
+      ref: parts[3] ?? null,
+      sourcePath: blobPath,
+      kind: "blob",
+    };
+  }
+
+  if (parts[2] === "tree") {
+    return {
+      hostname: url.hostname,
+      owner,
+      repo,
+      ref: parts[3] ?? null,
+      sourcePath: normalizeGitHubInstructionsPath(parts.slice(4).join("/")),
+      kind: "tree",
+    };
+  }
+
+  return {
+    hostname: url.hostname,
+    owner,
+    repo,
+    ref: null,
+    sourcePath: "",
+    kind: "repo",
+  };
+}
+
+function chooseGitHubInstructionsEntryFile(
+  files: Record<string, string>,
+  preferred: string | null,
+): string {
+  const paths = Object.keys(files).sort((a, b) => a.localeCompare(b));
+  if (paths.length === 0) {
+    throw unprocessable("GitHub instructions source did not include any readable files");
+  }
+
+  if (preferred && files[preferred] !== undefined) {
+    return preferred;
+  }
+
+  for (const candidate of GITHUB_INSTRUCTIONS_ENTRY_CANDIDATES) {
+    const exact = paths.find((value) => value === candidate);
+    if (exact) return exact;
+  }
+  for (const candidate of GITHUB_INSTRUCTIONS_ENTRY_CANDIDATES) {
+    const nested = paths.find((value) => value.toLowerCase().endsWith(`/${candidate.toLowerCase()}`));
+    if (nested) return nested;
+    const caseInsensitive = paths.find((value) => value.toLowerCase() === candidate.toLowerCase());
+    if (caseInsensitive) return caseInsensitive;
+  }
+
+  const markdown = paths.find((value) => value.toLowerCase().endsWith(".md"));
+  if (markdown) return markdown;
+  return paths[0]!;
+}
+
+function readGitHubTokenFromResolvedAdapterConfig(config: Record<string, unknown>): GitHubTokenResolution {
+  const env =
+    typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
+      ? (config.env as Record<string, unknown>)
+      : null;
+      console.log("Resolving GitHub token from adapter config env:", env);
+  if (!env) {
+    return { token: null, source: "none (adapterConfig.env missing)" };
+  }
+
+  const preferredKeys = [
+    "PAPERCLIP_GITHUB_TOKEN",
+    "GITHUB_PAT",
+    "GH_PAT",
+    "GITHUB_TOKEN",
+    "GH_TOKEN",
+  ];
+  for (const key of preferredKeys) {
+    const value = normalizeGitHubTokenForAuthorization(env[key]);
+    if (value) {
+      return { token: value, source: `agent adapterConfig.env.${key}` };
+    }
+  }
+
+  // Fallback: case-insensitive match for common token keys.
+  for (const [key, rawValue] of Object.entries(env)) {
+    const normalized = key.trim().toLowerCase();
+    if (
+      normalized === "paperclip_github_token"
+      || normalized === "github_token"
+      || normalized === "gh_token"
+      || normalized === "github_pat"
+      || normalized === "gh_pat"
+    ) {
+      const value = normalizeGitHubTokenForAuthorization(rawValue);
+      if (value) {
+        return { token: value, source: `agent adapterConfig.env.${key}` };
+      }
+    }
+  }
+  return { token: null, source: "none (no GitHub token key found in adapterConfig.env)" };
+}
+
+async function readGitHubJson(
+  url: string,
+  label: string,
+  githubToken?: string | null,
+  tokenSource?: string,
+): Promise<unknown> {
+  const headers: Record<string, string> = {
+    accept: "application/vnd.github+json",
+    "user-agent": "paperclip",
+  };
+  if (githubToken?.trim()) {
+    headers.authorization = `Bearer ${githubToken.trim()}`;
+  }
+
+  const response = await ghFetch(url, { headers });
+  if (!response.ok) {
+    const authHint = githubToken?.trim()
+      ? " Authorization header was sent from request-scoped token."
+      : " Authorization header depends on server env fallback.";
+    const sourceHint = tokenSource
+      ? ` Token source: ${tokenSource}.`
+      : githubToken?.trim()
+        ? " Token source: request-scoped override."
+        : " Token source: server env fallback (if configured).";
+    const tokenHint = response.status === 401 || response.status === 403 || response.status === 404
+      ? " For private repositories, provide a token either in agent adapterConfig.env (GITHUB_TOKEN/GH_TOKEN/PAPERCLIP_GITHUB_TOKEN) or server env. A GitHub 404 can also mean the token lacks repo access."
+      : "";
+    throw unprocessable(`Failed to fetch ${label} from GitHub (${response.status}).${sourceHint}${authHint}${tokenHint}`);
+  }
+  return await response.json();
+}
+
+async function readGitHubText(
+  url: string,
+  label: string,
+  githubToken?: string | null,
+  tokenSource?: string,
+): Promise<string> {
+  const headers: Record<string, string> = {
+    accept: "text/plain",
+    "user-agent": "paperclip",
+  };
+  if (githubToken?.trim()) {
+    headers.authorization = `Bearer ${githubToken.trim()}`;
+  }
+
+  const response = await ghFetch(url, { headers });
+  if (!response.ok) {
+    const authHint = githubToken?.trim()
+      ? " Authorization header was sent from request-scoped token."
+      : " Authorization header depends on server env fallback.";
+    const sourceHint = tokenSource
+      ? ` Token source: ${tokenSource}.`
+      : githubToken?.trim()
+        ? " Token source: request-scoped override."
+        : " Token source: server env fallback (if configured).";
+    const tokenHint = response.status === 401 || response.status === 403 || response.status === 404
+      ? " For private repositories, provide a token either in agent adapterConfig.env (GITHUB_TOKEN/GH_TOKEN/PAPERCLIP_GITHUB_TOKEN) or server env. A GitHub 404 can also mean the token lacks repo access."
+      : "";
+    throw unprocessable(`Failed to fetch ${label} from GitHub (${response.status}).${sourceHint}${authHint}${tokenHint}`);
+  }
+  return await response.text();
+}
+
+async function resolveInstructionsBundleFromGitHubUrl(
+  rawUrl: string,
+  githubToken?: string | null,
+  tokenSource?: string,
+): Promise<{ files: Record<string, string>; entryFile: string }> {
+  const parsed = parseGitHubInstructionsSource(rawUrl.trim());
+  const apiBase = gitHubApiBase(parsed.hostname);
+
+  const ref = parsed.ref
+    || asNonEmptyStringGlobal((await readGitHubJson(
+      `${apiBase}/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}`,
+      "GitHub repository metadata",
+      githubToken,
+      tokenSource,
+    ) as Record<string, unknown>).default_branch)
+    || "main";
+
+  const files: Record<string, string> = {};
+
+  if (parsed.kind === "blob") {
+    const content = await readGitHubText(
+      resolveRawGitHubUrl(parsed.hostname, parsed.owner, parsed.repo, ref, parsed.sourcePath),
+      parsed.sourcePath,
+      githubToken,
+      tokenSource,
+    );
+    if (content.includes("\u0000")) {
+      throw unprocessable("GitHub instructions file appears to be binary");
+    }
+    const fileName = path.posix.basename(parsed.sourcePath);
+    files[fileName] = content;
+    return { files, entryFile: fileName };
+  }
+
+  const treeRaw = await readGitHubJson(
+    `${apiBase}/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
+    "GitHub repository tree",
+    githubToken,
+    tokenSource,
+  );
+  const tree = Array.isArray((treeRaw as { tree?: unknown }).tree)
+    ? (treeRaw as { tree: Array<Record<string, unknown>> }).tree
+    : null;
+  if (!tree) {
+    throw unprocessable("Failed to read GitHub repository tree");
+  }
+
+  const sourcePrefix = parsed.sourcePath ? `${parsed.sourcePath}/` : "";
+  const blobEntries = tree
+    .map((entry) => {
+      const entryPath = asNonEmptyStringGlobal(entry.path);
+      if (!entryPath || asNonEmptyStringGlobal(entry.type) !== "blob") return null;
+      if (parsed.kind === "tree") {
+        if (!sourcePrefix && entryPath === parsed.sourcePath) return null;
+        if (sourcePrefix && !entryPath.startsWith(sourcePrefix)) return null;
+      }
+      const relativePath = parsed.kind === "tree" && sourcePrefix
+        ? entryPath.slice(sourcePrefix.length)
+        : entryPath;
+      if (!relativePath) return null;
+      const normalizedRelativePath = normalizeGitHubInstructionsPath(relativePath);
+      if (!normalizedRelativePath) return null;
+      return { fullPath: entryPath, relativePath: normalizedRelativePath };
+    })
+    .filter((entry): entry is { fullPath: string; relativePath: string } => Boolean(entry))
+    .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+
+  if (blobEntries.length === 0) {
+    throw unprocessable("No files found at the provided GitHub instructions path");
+  }
+  if (blobEntries.length > GITHUB_INSTRUCTIONS_MAX_FILES) {
+    throw unprocessable(
+      `GitHub instructions source is too large (${blobEntries.length} files). Maximum ${GITHUB_INSTRUCTIONS_MAX_FILES} files are allowed.`,
+    );
+  }
+
+  let totalBytes = 0;
+  for (const entry of blobEntries) {
+    const content = await readGitHubText(
+      resolveRawGitHubUrl(parsed.hostname, parsed.owner, parsed.repo, ref, entry.fullPath),
+      entry.fullPath,
+      githubToken,
+      tokenSource,
+    );
+    if (content.includes("\u0000")) continue;
+    totalBytes += Buffer.byteLength(content, "utf8");
+    if (totalBytes > GITHUB_INSTRUCTIONS_MAX_TOTAL_BYTES) {
+      throw unprocessable(
+        `GitHub instructions source is too large. Maximum ${Math.trunc(GITHUB_INSTRUCTIONS_MAX_TOTAL_BYTES / 1024)}KB is allowed.`,
+      );
+    }
+    files[entry.relativePath] = content;
+  }
+
+  const preferredEntryFile = parsed.sourcePath
+    ? path.posix.basename(parsed.sourcePath)
+    : null;
+  return {
+    files,
+    entryFile: chooseGitHubInstructionsEntryFile(files, preferredEntryFile),
+  };
 }
 
 export function agentRoutes(
@@ -1832,7 +2185,7 @@ export function agentRoutes(
     }
     await assertCanReadConfigurations(req, agent.companyId);
     const revisions = await svc.listConfigRevisions(id);
-    res.json(revisions.map((revision) => redactConfigRevision(revision)));
+    res.json(revisions.map((revision : any) => redactConfigRevision(revision)));
   });
 
   router.get("/agents/:id/config-revisions/:revisionId", async (req, res) => {
@@ -1915,7 +2268,7 @@ export function agentRoutes(
 
     const sessions = await heartbeat.listTaskSessions(id);
     res.json(
-      sessions.map((session) => ({
+      sessions.map((session : any) => ({
         ...session,
         sessionParamsJson: redactEventPayload(session.sessionParamsJson ?? null),
       })),
@@ -1959,10 +2312,12 @@ export function agentRoutes(
     const {
       desiredSkills: requestedDesiredSkills,
       instructionsBundle,
+      instructionsGithubUrl,
       sourceIssueId: _sourceIssueId,
       sourceIssueIds: _sourceIssueIds,
       ...hireInput
     } = req.body;
+ 
     hireInput.adapterType = assertKnownAdapterType(hireInput.adapterType);
     const rawHireAdapterConfig = (hireInput.adapterConfig ?? {}) as Record<string, unknown>;
     assertNoNewAgentLegacyPromptTemplate(
@@ -1997,12 +2352,34 @@ export function agentRoutes(
       adapterConfig: normalizedAdapterConfig,
       runtimeConfig: normalizedRuntimeConfig,
     };
+    const instructionsGitHubUrlValue = asNonEmptyString(instructionsGithubUrl);
+    if (instructionsBundle && instructionsGitHubUrlValue) {
+      throw unprocessable("Provide either instructionsBundle or instructionsGithubUrl, not both");
+    }
+    if (instructionsGitHubUrlValue && !adapterSupportsInstructionsBundle(hireInput.adapterType)) {
+      throw unprocessable(
+        `Adapter ${hireInput.adapterType} does not support managed instructions bundle imports from GitHub`,
+      );
+    }
+    const githubTokenResolutionForInstructionsImport = instructionsGitHubUrlValue
+      ? readGitHubTokenFromResolvedAdapterConfig(
+        (await secretsSvc.resolveAdapterConfigForRuntime(companyId, normalizedAdapterConfig)).config,
+      )
+      : { token: null, source: "none (GitHub URL import disabled)" };
+      console.log("GitHub token resolution for instructions bundle import:", githubTokenResolutionForInstructionsImport);
+    const importedInstructionsBundle = instructionsGitHubUrlValue
+      ? await resolveInstructionsBundleFromGitHubUrl(
+        instructionsGitHubUrlValue,
+        githubTokenResolutionForInstructionsImport.token,
+        githubTokenResolutionForInstructionsImport.source,
+      )
+      : instructionsBundle;
 
     const company = await db
       .select()
       .from(companies)
       .where(eq(companies.id, companyId))
-      .then((rows) => rows[0] ?? null);
+      .then((rows ) => rows[0] ?? null);
     if (!company) {
       res.status(404).json({ error: "Company not found" });
       return;
@@ -2016,7 +2393,15 @@ export function agentRoutes(
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
     });
-    const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
+    const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, importedInstructionsBundle);
+    const agentEnv = asRecord(agent.adapterConfig)?.env;
+    if (agentEnv) {
+      await secretsSvc.syncEnvBindingsForTarget?.(
+        companyId,
+        { targetType: "agent", targetId: agent.id },
+        agentEnv,
+      );
+    }
 
     let approval: Awaited<ReturnType<typeof approvalsSvc.getById>> | null = null;
     const actor = getActorInfo(req);
@@ -2147,6 +2532,7 @@ export function agentRoutes(
     const {
       desiredSkills: requestedDesiredSkills,
       instructionsBundle,
+      instructionsGithubUrl,
       ...createInput
     } = req.body;
     createInput.adapterType = assertKnownAdapterType(createInput.adapterType);
@@ -2178,6 +2564,27 @@ export function agentRoutes(
       normalizeNewAgentRuntimeConfig(createInput.runtimeConfig),
       normalizedAdapterConfig,
     );
+    const instructionsGitHubUrlValue = asNonEmptyString(instructionsGithubUrl);
+    if (instructionsBundle && instructionsGitHubUrlValue) {
+      throw unprocessable("Provide either instructionsBundle or instructionsGithubUrl, not both");
+    }
+    if (instructionsGitHubUrlValue && !adapterSupportsInstructionsBundle(createInput.adapterType)) {
+      throw unprocessable(
+        `Adapter ${createInput.adapterType} does not support managed instructions bundle imports from GitHub`,
+      );
+    }
+    const githubTokenResolutionForInstructionsImport = instructionsGitHubUrlValue
+      ? readGitHubTokenFromResolvedAdapterConfig(
+        (await secretsSvc.resolveAdapterConfigForRuntime(companyId, normalizedAdapterConfig)).config,
+      )
+      : { token: null, source: "none (GitHub URL import disabled)" };
+    const importedInstructionsBundle = instructionsGitHubUrlValue
+      ? await resolveInstructionsBundleFromGitHubUrl(
+        instructionsGitHubUrlValue,
+        githubTokenResolutionForInstructionsImport.token,
+        githubTokenResolutionForInstructionsImport.source,
+      )
+      : instructionsBundle;
     await assertAgentEnvironmentSelection(companyId, createInput.adapterType, createInput.defaultEnvironmentId);
     await assertAgentDefaultEnvironmentSelection(companyId, createInput.defaultEnvironmentId, {
       allowedDrivers: allowedEnvironmentDriversForAgent(createInput.adapterType),
@@ -2192,7 +2599,7 @@ export function agentRoutes(
       spentMonthlyCents: 0,
       lastHeartbeatAt: null,
     });
-    const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, instructionsBundle);
+    const agent = await materializeDefaultInstructionsBundleForNewAgent(createdAgent, importedInstructionsBundle);
     const agentEnv = asRecord(agent.adapterConfig)?.env;
     if (agentEnv) {
       await secretsSvc.syncEnvBindingsForTarget?.(
