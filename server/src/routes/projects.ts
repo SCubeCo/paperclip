@@ -779,7 +779,7 @@ export function projectRoutes(db: Db) {
     const agentType = body.agentType as "requirement-breakdown" | "sow";
     const requirements = (body.requirements as string).trim();
 
-    let leadAgent: typeof agents.$inferSelect | undefined;
+    let leadAgent: RequirementAnalysisLeadCandidate | undefined;
 
     if (project.leadAgentId) {
       [leadAgent] = await db
