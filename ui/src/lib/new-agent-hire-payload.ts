@@ -7,6 +7,7 @@ export function buildNewAgentHirePayload(input: {
   title?: string;
   reportsTo?: string | null;
   selectedSkillKeys?: string[];
+  instructionsGithubUrl?: string;
   configValues: CreateConfigValues;
   adapterConfig: Record<string, unknown>;
 }) {
@@ -16,6 +17,7 @@ export function buildNewAgentHirePayload(input: {
     title,
     reportsTo,
     selectedSkillKeys = [],
+    instructionsGithubUrl,
     configValues,
     adapterConfig,
   } = input;
@@ -26,6 +28,7 @@ export function buildNewAgentHirePayload(input: {
     ...(title?.trim() ? { title: title.trim() } : {}),
     ...(reportsTo ? { reportsTo } : {}),
     ...(selectedSkillKeys.length > 0 ? { desiredSkills: selectedSkillKeys } : {}),
+    ...(instructionsGithubUrl?.trim() ? { instructionsGithubUrl: instructionsGithubUrl.trim() } : {}),
     adapterType: configValues.adapterType,
     defaultEnvironmentId: configValues.defaultEnvironmentId ?? null,
     adapterConfig,
