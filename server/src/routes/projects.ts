@@ -41,6 +41,32 @@ import { secretService } from "../services/secrets.js";
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
 
+type RequirementAnalysisLeadCandidate = Pick<
+  typeof agents.$inferSelect,
+  "id" | "role" | "status" | "createdAt"
+>;
+
+export function pickRequirementAnalysisLeadAgent(
+  candidates: RequirementAnalysisLeadCandidate[],
+): RequirementAnalysisLeadCandidate | undefined {
+  const active = candidates.filter((candidate) => candidate.status !== "terminated");
+  if (active.length === 0) return undefined;
+
+  const sorted = [...active].sort((a, b) => {
+    const roleRankA = a.role === "ceo" ? 0 : 1;
+    const roleRankB = b.role === "ceo" ? 0 : 1;
+    if (roleRankA !== roleRankB) return roleRankA - roleRankB;
+
+    const createdA = a.createdAt instanceof Date ? a.createdAt.getTime() : 0;
+    const createdB = b.createdAt instanceof Date ? b.createdAt.getTime() : 0;
+    if (createdA !== createdB) return createdA - createdB;
+
+    return a.id.localeCompare(b.id);
+  });
+
+  return sorted[0];
+}
+
 type GraphMailConfig = {
   tenantId: string;
   clientId: string;
@@ -759,16 +785,17 @@ export function projectRoutes(db: Db) {
       [leadAgent] = await db
         .select()
         .from(agents)
-        .where(eq(agents.id, project.leadAgentId))
+        .where(and(eq(agents.id, project.leadAgentId), ne(agents.status, "terminated")))
         .limit(1);
     }
 
     if (!leadAgent) {
-      [leadAgent] = await db
+      const activeAgents = await db
         .select()
         .from(agents)
         .where(and(eq(agents.companyId, project.companyId), ne(agents.status, "terminated")))
-        .limit(1);
+        .limit(2000);
+      leadAgent = pickRequirementAnalysisLeadAgent(activeAgents);
     }
 
     if (!leadAgent) {

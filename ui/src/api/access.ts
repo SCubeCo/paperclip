@@ -210,8 +210,10 @@ export type EmployeesListResponse = {
   employees: EmployeeRecord[];
   owners: Array<{
     membershipId: string;
+    principalId: string;
     displayName: string;
     status: "pending" | "active" | "suspended";
+    personalAgent: EmployeePersonalAgentSummary | null;
   }>;
   access: {
     canCreateEmployees: boolean;

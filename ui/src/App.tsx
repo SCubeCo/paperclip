@@ -1,5 +1,6 @@
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "@/lib/router";
 import { Button } from "@/components/ui/button";
+import { useQuery } from "@tanstack/react-query";
 import { Layout } from "./components/Layout";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { CloudAccessGate } from "./components/CloudAccessGate";
@@ -53,9 +54,11 @@ import { CliAuthPage } from "./pages/CliAuth";
 import { InviteLandingPage } from "./pages/InviteLanding";
 import { JoinRequestQueue } from "./pages/JoinRequestQueue";
 import { NotFoundPage } from "./pages/NotFound";
+import { accessApi } from "./api/access";
 import { useCompany } from "./context/CompanyContext";
 import { useDialogActions } from "./context/DialogContext";
 import { loadLastInboxTab } from "./lib/inbox";
+import { queryKeys } from "./lib/queryKeys";
 import {
   resolveDirectOnboardingRedirect,
   shouldRedirectCompanylessRouteToOnboarding,
@@ -158,6 +161,11 @@ function OnboardingRoutePage() {
   const { companies, selectedCompany } = useCompany();
   const { openOnboarding } = useDialogActions();
   const { companyPrefix } = useParams<{ companyPrefix?: string }>();
+  const { data: boardAccess } = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: () => accessApi.getCurrentBoardAccess(),
+    retry: false,
+  });
   const directOnboardingRedirectTarget = resolveDirectOnboardingRedirect({
     pathname: location.pathname,
     companyPrefix,
@@ -172,13 +180,16 @@ function OnboardingRoutePage() {
   const matchedCompany = companyPrefix
     ? companies.find((company) => company.issuePrefix.toUpperCase() === companyPrefix.toUpperCase()) ?? null
     : null;
+  const canCreateCompany = boardAccess?.canCreateCompany ?? true;
+  const fallbackCompany = selectedCompany ?? companies[0] ?? null;
+  const onboardingTargetCompany = matchedCompany ?? (!canCreateCompany ? fallbackCompany : null);
 
-  const title = matchedCompany
-    ? `Add another agent to ${matchedCompany.name}`
+  const title = onboardingTargetCompany
+    ? `Add another agent to ${onboardingTargetCompany.name}`
     : companies.length > 0
       ? "Create another company"
       : "Create your first company";
-  const description = matchedCompany
+  const description = onboardingTargetCompany
     ? "Run onboarding again to add an agent and a starter task for this company."
     : companies.length > 0
       ? "Run onboarding again to create another company and seed its first agent."
@@ -192,12 +203,12 @@ function OnboardingRoutePage() {
         <div className="mt-4">
           <Button
             onClick={() =>
-              matchedCompany
-                ? openOnboarding({ initialStep: 2, companyId: matchedCompany.id })
+              onboardingTargetCompany
+                ? openOnboarding({ initialStep: 2, companyId: onboardingTargetCompany.id })
                 : openOnboarding()
             }
           >
-            {matchedCompany ? "Add Agent" : "Start Onboarding"}
+            {onboardingTargetCompany ? "Add Agent" : "Start Onboarding"}
           </Button>
         </div>
       </div>

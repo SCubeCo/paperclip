@@ -71,7 +71,12 @@ const DEFAULT_TASK_DESCRIPTION = `You are the CEO. You set the direction for the
 
 export function OnboardingWizard() {
   const { onboardingOpen, onboardingOptions, closeOnboarding } = useDialog();
-  const { companies, setSelectedCompanyId, loading: companiesLoading } = useCompany();
+  const {
+    companies,
+    selectedCompanyId,
+    setSelectedCompanyId,
+    loading: companiesLoading,
+  } = useCompany();
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
@@ -415,7 +420,26 @@ export function OnboardingWizard() {
 
       setStep(2);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create company");
+      const message = err instanceof Error ? err.message : "Failed to create company";
+      const needsInstanceAdmin = message.includes("Instance admin required");
+      if (needsInstanceAdmin && companies.length > 0) {
+        const fallbackCompany =
+          (selectedCompanyId
+            ? companies.find((company) => company.id === selectedCompanyId)
+            : null) ?? companies[0] ?? null;
+        if (fallbackCompany) {
+          setCreatedCompanyId(fallbackCompany.id);
+          setCreatedCompanyPrefix(fallbackCompany.issuePrefix);
+          setCreatedCompanyGoalId(null);
+          setSelectedCompanyId(fallbackCompany.id);
+          setError(
+            "You can’t create another company with this account, so onboarding will continue in your current company."
+          );
+          setStep(2);
+          return;
+        }
+      }
+      setError(message);
     } finally {
       setLoading(false);
     }
