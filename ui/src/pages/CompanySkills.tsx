@@ -46,6 +46,7 @@ import {
   Folder,
   FolderOpen,
   Github,
+  KeyRound,
   Link2,
   ExternalLink,
   Paperclip,
@@ -778,6 +779,8 @@ export function CompanySkills() {
   const { pushToast } = useToastActions();
   const [skillFilter, setSkillFilter] = useState("");
   const [source, setSource] = useState("");
+  const [githubToken, setGithubToken] = useState("");
+  const [showTokenInput, setShowTokenInput] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [emptySourceHelpOpen, setEmptySourceHelpOpen] = useState(false);
   const [expandedSkillId, setExpandedSkillId] = useState<string | null>(null);
@@ -903,7 +906,8 @@ export function CompanySkills() {
   }
 
   const importSkill = useMutation({
-    mutationFn: (importSource: string) => companySkillsApi.importFromSource(selectedCompanyId!, importSource),
+    mutationFn: ({ importSource, token }: { importSource: string; token?: string }) =>
+      companySkillsApi.importFromSource(selectedCompanyId!, importSource, token || undefined),
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: queryKeys.companySkills.list(selectedCompanyId!) });
       if (result.imported[0]) navigate(skillRoute(result.imported[0].id));
@@ -916,12 +920,19 @@ export function CompanySkills() {
         pushToast({ tone: "warn", title: "Import warnings", body: result.warnings[0] });
       }
       setSource("");
+      setGithubToken("");
+      setShowTokenInput(false);
     },
     onError: (error) => {
+      const message = error instanceof Error ? error.message : "Failed to import skill source.";
+      const needsToken = /401|403|404|private repository|GITHUB_TOKEN|PAPERCLIP_GITHUB_TOKEN/i.test(message);
+      if (needsToken) {
+        setShowTokenInput(true);
+      }
       pushToast({
         tone: "error",
         title: "Skill import failed",
-        body: error instanceof Error ? error.message : "Failed to import skill source.",
+        body: message,
       });
     },
   });
@@ -1089,7 +1100,7 @@ export function CompanySkills() {
       setEmptySourceHelpOpen(true);
       return;
     }
-    importSkill.mutate(trimmedSource);
+    importSkill.mutate({ importSource: trimmedSource, token: githubToken.trim() || undefined });
   }
 
   return (
@@ -1224,9 +1235,18 @@ export function CompanySkills() {
               <input
                 value={source}
                 onChange={(event) => setSource(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter") handleAddSkillSource(); }}
                 placeholder="Paste path, GitHub URL, or skills.sh command"
                 className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
               />
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                title="Provide GitHub token for private repositories"
+                onClick={() => setShowTokenInput((v) => !v)}
+              >
+                <KeyRound className={cn("h-4 w-4", showTokenInput ? "text-foreground" : "text-muted-foreground")} />
+              </Button>
               <Button
                 size="sm"
                 variant="ghost"
@@ -1236,6 +1256,18 @@ export function CompanySkills() {
                 {importSkill.isPending ? <RefreshCw className="h-4 w-4 animate-spin" /> : "Add"}
               </Button>
             </div>
+            {showTokenInput && (
+              <div className="mt-2 flex items-center gap-2 border-b border-border pb-2">
+                <KeyRound className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <input
+                  type="password"
+                  value={githubToken}
+                  onChange={(event) => setGithubToken(event.target.value)}
+                  placeholder="GitHub token for private repo access"
+                  className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+                />
+              </div>
+            )}
             {scanStatusMessage && (
               <p className="mt-3 text-xs text-muted-foreground">
                 {scanStatusMessage}
