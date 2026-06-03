@@ -264,7 +264,13 @@ export const localEncryptedProvider: SecretProviderModule = {
   },
   async resolveVersion(input) {
     const masterKey = loadOrCreateMasterKey();
-    return decryptValue(masterKey, asLocalEncryptedMaterial(input.material));
+    try {
+      return decryptValue(masterKey, asLocalEncryptedMaterial(input.material));
+    } catch {
+      throw badRequest(
+        "Unable to decrypt secret value. Check PAPERCLIP_SECRETS_MASTER_KEY (or shared secrets key file) is consistent across all server instances.",
+      );
+    }
   },
   async deleteOrArchive() {
     // Secret metadata deletion is handled in Paperclip DB; the local key is shared and must remain.
