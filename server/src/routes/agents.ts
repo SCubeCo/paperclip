@@ -162,6 +162,31 @@ function normalizeGitHubTokenForAuthorization(value: unknown): string | null {
   return withoutScheme.length > 0 ? withoutScheme : null;
 }
 
+function isGitHubNotFoundError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("(404)");
+}
+
+function buildGitHubTreeRefPathCandidates(initialRef: string, sourcePath: string) {
+  const normalizedPath = normalizeGitHubInstructionsPath(sourcePath);
+  if (!normalizedPath) return [{ ref: initialRef, sourcePath: "" }];
+
+  const segments = normalizedPath.split("/").filter(Boolean);
+  const candidates: Array<{ ref: string; sourcePath: string }> = [{ ref: initialRef, sourcePath: normalizedPath }];
+  for (let index = 1; index <= segments.length; index += 1) {
+    const ref = `${initialRef}/${segments.slice(0, index).join("/")}`;
+    const nextSourcePath = segments.slice(index).join("/");
+    candidates.push({ ref, sourcePath: nextSourcePath });
+  }
+
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = `${candidate.ref}::${candidate.sourcePath}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function parseGitHubInstructionsSource(rawUrl: string): ParsedGitHubInstructionsSource {
   let url: URL;
   try {
@@ -264,7 +289,7 @@ function readGitHubTokenFromResolvedAdapterConfig(config: Record<string, unknown
     typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
       ? (config.env as Record<string, unknown>)
       : null;
-      console.log("Resolving GitHub token from adapter config env:", env);
+  console.log("Resolving GitHub token from adapter config env keys:", env ? Object.keys(env).sort() : null);
   if (!env) {
     return { token: null, source: "none (adapterConfig.env missing)" };
   }
@@ -274,6 +299,7 @@ function readGitHubTokenFromResolvedAdapterConfig(config: Record<string, unknown
     "GITHUB_PAT",
     "GH_PAT",
     "GITHUB_TOKEN",
+    "GIHTHUB_TOKEN",
     "GH_TOKEN",
   ];
   for (const key of preferredKeys) {
@@ -289,6 +315,7 @@ function readGitHubTokenFromResolvedAdapterConfig(config: Record<string, unknown
     if (
       normalized === "paperclip_github_token"
       || normalized === "github_token"
+      || normalized === "gihthub_token"
       || normalized === "gh_token"
       || normalized === "github_pat"
       || normalized === "gh_pat"
@@ -384,6 +411,8 @@ async function resolveInstructionsBundleFromGitHubUrl(
     || "main";
 
   const files: Record<string, string> = {};
+  let resolvedRef = ref;
+  let resolvedSourcePath = parsed.sourcePath;
 
   if (parsed.kind === "blob") {
     const content = await readGitHubText(
@@ -400,12 +429,47 @@ async function resolveInstructionsBundleFromGitHubUrl(
     return { files, entryFile: fileName };
   }
 
-  const treeRaw = await readGitHubJson(
-    `${apiBase}/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/git/trees/${encodeURIComponent(ref)}?recursive=1`,
-    "GitHub repository tree",
-    githubToken,
-    tokenSource,
-  );
+  let treeRaw: unknown;
+  try {
+    treeRaw = await readGitHubJson(
+      `${apiBase}/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/git/trees/${encodeURIComponent(resolvedRef)}?recursive=1`,
+      "GitHub repository tree",
+      githubToken,
+      tokenSource,
+    );
+  } catch (error) {
+    if (!(parsed.kind === "tree" && parsed.ref && parsed.sourcePath && isGitHubNotFoundError(error))) {
+      throw error;
+    }
+
+    let recovered = false;
+    const candidates = buildGitHubTreeRefPathCandidates(parsed.ref, parsed.sourcePath);
+    for (const candidate of candidates) {
+      if (candidate.ref === resolvedRef && candidate.sourcePath === resolvedSourcePath) {
+        continue;
+      }
+      try {
+        treeRaw = await readGitHubJson(
+          `${apiBase}/repos/${encodeURIComponent(parsed.owner)}/${encodeURIComponent(parsed.repo)}/git/trees/${encodeURIComponent(candidate.ref)}?recursive=1`,
+          "GitHub repository tree",
+          githubToken,
+          tokenSource,
+        );
+        resolvedRef = candidate.ref;
+        resolvedSourcePath = candidate.sourcePath;
+        recovered = true;
+        break;
+      } catch (candidateError) {
+        if (!isGitHubNotFoundError(candidateError)) {
+          throw candidateError;
+        }
+      }
+    }
+
+    if (!recovered) {
+      throw error;
+    }
+  }
   const tree = Array.isArray((treeRaw as { tree?: unknown }).tree)
     ? (treeRaw as { tree: Array<Record<string, unknown>> }).tree
     : null;
@@ -413,13 +477,13 @@ async function resolveInstructionsBundleFromGitHubUrl(
     throw unprocessable("Failed to read GitHub repository tree");
   }
 
-  const sourcePrefix = parsed.sourcePath ? `${parsed.sourcePath}/` : "";
+  const sourcePrefix = resolvedSourcePath ? `${resolvedSourcePath}/` : "";
   const blobEntries = tree
     .map((entry) => {
       const entryPath = asNonEmptyStringGlobal(entry.path);
       if (!entryPath || asNonEmptyStringGlobal(entry.type) !== "blob") return null;
       if (parsed.kind === "tree") {
-        if (!sourcePrefix && entryPath === parsed.sourcePath) return null;
+        if (!sourcePrefix && entryPath === resolvedSourcePath) return null;
         if (sourcePrefix && !entryPath.startsWith(sourcePrefix)) return null;
       }
       const relativePath = parsed.kind === "tree" && sourcePrefix
@@ -445,7 +509,7 @@ async function resolveInstructionsBundleFromGitHubUrl(
   let totalBytes = 0;
   for (const entry of blobEntries) {
     const content = await readGitHubText(
-      resolveRawGitHubUrl(parsed.hostname, parsed.owner, parsed.repo, ref, entry.fullPath),
+      resolveRawGitHubUrl(parsed.hostname, parsed.owner, parsed.repo, resolvedRef, entry.fullPath),
       entry.fullPath,
       githubToken,
       tokenSource,
@@ -460,8 +524,8 @@ async function resolveInstructionsBundleFromGitHubUrl(
     files[entry.relativePath] = content;
   }
 
-  const preferredEntryFile = parsed.sourcePath
-    ? path.posix.basename(parsed.sourcePath)
+  const preferredEntryFile = resolvedSourcePath
+    ? path.posix.basename(resolvedSourcePath)
     : null;
   return {
     files,
@@ -2366,7 +2430,11 @@ export function agentRoutes(
         (await secretsSvc.resolveAdapterConfigForRuntime(companyId, normalizedAdapterConfig)).config,
       )
       : { token: null, source: "none (GitHub URL import disabled)" };
-      console.log("GitHub token resolution for instructions bundle import:", githubTokenResolutionForInstructionsImport);
+    console.log("GitHub token resolution for instructions bundle import:", {
+      token: githubTokenResolutionForInstructionsImport.token ? "[redacted]" : null,
+      hasToken: Boolean(githubTokenResolutionForInstructionsImport.token),
+      source: githubTokenResolutionForInstructionsImport.source,
+    });
     const importedInstructionsBundle = instructionsGitHubUrlValue
       ? await resolveInstructionsBundleFromGitHubUrl(
         instructionsGitHubUrlValue,
