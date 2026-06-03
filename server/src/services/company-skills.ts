@@ -624,6 +624,66 @@ function parseGitHubSourceUrl(rawUrl: string) {
   return { hostname: url.hostname, owner, repo, ref, basePath, filePath, explicitRef };
 }
 
+function buildGitHubRefPathCandidates(parsed: ReturnType<typeof parseGitHubSourceUrl>) {
+  if (!parsed.explicitRef) return [parsed];
+
+  const sourcePath = parsed.filePath ?? parsed.basePath;
+  if (!sourcePath) return [parsed];
+
+  const normalizedSourcePath = sourcePath.replace(/^\/+|\/+$/g, "");
+  if (!normalizedSourcePath) return [parsed];
+
+  const segments = normalizedSourcePath.split("/").filter(Boolean);
+  const candidates: Array<ReturnType<typeof parseGitHubSourceUrl>> = [parsed];
+  for (let index = 1; index <= segments.length; index += 1) {
+    const nextRef = `${parsed.ref}/${segments.slice(0, index).join("/")}`;
+    if (parsed.filePath) {
+      const remainingFilePath = segments.slice(index).join("/");
+      if (!remainingFilePath) continue;
+      candidates.push({
+        ...parsed,
+        ref: nextRef,
+        filePath: remainingFilePath,
+        basePath: path.posix.dirname(remainingFilePath),
+      });
+      continue;
+    }
+
+    candidates.push({
+      ...parsed,
+      ref: nextRef,
+      basePath: segments.slice(index).join("/"),
+    });
+  }
+
+  const seen = new Set<string>();
+  return candidates.filter((candidate) => {
+    const key = [candidate.ref, candidate.basePath, candidate.filePath ?? ""].join("::");
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+async function resolveGitHubPinnedRefWithFallback(parsed: ReturnType<typeof parseGitHubSourceUrl>, githubToken?: string) {
+  const candidates = buildGitHubRefPathCandidates(parsed);
+  let lastError: unknown = null;
+
+  for (const candidate of candidates) {
+    try {
+      const resolved = await resolveGitHubPinnedRef(candidate, githubToken);
+      return { parsed: candidate, ...resolved };
+    } catch (error) {
+      lastError = error;
+      if (candidate === candidates[candidates.length - 1]) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 async function resolveGitHubPinnedRef(parsed: ReturnType<typeof parseGitHubSourceUrl>, githubToken?: string) {
   const apiBase = gitHubApiBase(parsed.hostname);
   if (/^[0-9a-f]{40}$/i.test(parsed.ref.trim())) {
@@ -1081,11 +1141,11 @@ async function readUrlSkillImports(
   } catch { return false; } })();
   if (looksLikeRepoUrl) {
     const parsed = parseGitHubSourceUrl(url);
-    const apiBase = gitHubApiBase(parsed.hostname);
-    const { pinnedRef, trackingRef } = await resolveGitHubPinnedRef(parsed, githubToken);
+    const { parsed: resolvedParsed, pinnedRef, trackingRef } = await resolveGitHubPinnedRefWithFallback(parsed, githubToken);
+    const apiBase = gitHubApiBase(resolvedParsed.hostname);
     let ref = pinnedRef;
     const tree = await fetchJson<{ tree?: Array<{ path: string; type: string }> }>(
-      `${apiBase}/repos/${parsed.owner}/${parsed.repo}/git/trees/${ref}?recursive=1`,
+      `${apiBase}/repos/${resolvedParsed.owner}/${resolvedParsed.repo}/git/trees/${ref}?recursive=1`,
       githubToken,
     ).catch(() => {
       throw unprocessable(`Failed to read GitHub tree for ${url}.${hintToken(0)}`);
@@ -1094,13 +1154,13 @@ async function readUrlSkillImports(
       .filter((entry) => entry.type === "blob")
       .map((entry) => entry.path)
       .filter((entry): entry is string => typeof entry === "string");
-    const basePrefix = parsed.basePath ? `${parsed.basePath.replace(/^\/+|\/+$/g, "")}/` : "";
+    const basePrefix = resolvedParsed.basePath ? `${resolvedParsed.basePath.replace(/^\/+|\/+$/g, "")}/` : "";
     const scopedPaths = basePrefix
       ? allPaths.filter((entry) => entry.startsWith(basePrefix))
       : allPaths;
     const relativePaths = scopedPaths.map((entry) => basePrefix ? entry.slice(basePrefix.length) : entry);
-    const filteredPaths = parsed.filePath
-      ? relativePaths.filter((entry) => entry === path.posix.relative(parsed.basePath || ".", parsed.filePath!))
+    const filteredPaths = resolvedParsed.filePath
+      ? relativePaths.filter((entry) => entry === path.posix.relative(resolvedParsed.basePath || ".", resolvedParsed.filePath!))
       : relativePaths;
     const skillPaths = filteredPaths.filter(
       (entry) => path.posix.basename(entry).toLowerCase() === "skill.md",
@@ -1113,7 +1173,7 @@ async function readUrlSkillImports(
     const skills: ImportedSkill[] = [];
     for (const relativeSkillPath of skillPaths) {
       const repoSkillPath = basePrefix ? `${basePrefix}${relativeSkillPath}` : relativeSkillPath;
-      const markdown = await fetchText(resolveRawGitHubUrl(parsed.hostname, parsed.owner, parsed.repo, ref, repoSkillPath), githubToken);
+      const markdown = await fetchText(resolveRawGitHubUrl(resolvedParsed.hostname, resolvedParsed.owner, resolvedParsed.repo, ref, repoSkillPath), githubToken);
       const parsedMarkdown = parseFrontmatterMarkdown(markdown);
       const skillDir = path.posix.dirname(relativeSkillPath);
       const slug = deriveImportedSkillSlug(parsedMarkdown.frontmatter, path.posix.basename(skillDir));
@@ -1127,9 +1187,9 @@ async function readUrlSkillImports(
       const metadata = {
         ...(skillKey ? { skillKey } : {}),
         sourceKind: "github",
-        ...(parsed.hostname !== "github.com" ? { hostname: parsed.hostname } : {}),
-        owner: parsed.owner,
-        repo: parsed.repo,
+        ...(resolvedParsed.hostname !== "github.com" ? { hostname: resolvedParsed.hostname } : {}),
+        owner: resolvedParsed.owner,
+        repo: resolvedParsed.repo,
         ref,
         trackingRef,
         repoSkillDir: normalizeGitHubSkillDirectory(
