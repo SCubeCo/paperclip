@@ -457,6 +457,15 @@ export function agentInstructionsService() {
     if (!state.rootPath) return toBundle(agent, state, []);
     const stat = await statIfExists(state.rootPath);
     if (!stat?.isDirectory()) {
+      if (state.mode === "managed") {
+        try {
+          await fs.mkdir(state.rootPath, { recursive: true });
+        } catch { /* best effort */ }
+        const retryStat = await statIfExists(state.rootPath);
+        if (retryStat?.isDirectory()) {
+          return toBundle(agent, state, []);
+        }
+      }
       return toBundle(agent, {
         ...state,
         warnings: [...state.warnings, `Instructions root does not exist: ${state.rootPath}`],

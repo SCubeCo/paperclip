@@ -1,0 +1,39 @@
+[10:42:13] [32mINFO[39m: [36mUsing external PostgreSQL via DATABASE_URL/config[39m
+
+[36m██████╗  █████╗ ██████╗ ███████╗██████╗  ██████╗██╗     ██╗██████╗ [0m
+[36m██╔══██╗██╔══██╗██╔══██╗██╔════╝██╔══██╗██╔════╝██║     ██║██╔══██╗[0m
+[36m██████╔╝███████║██████╔╝█████╗  ██████╔╝██║     ██║     ██║██████╔╝[0m
+[36m██╔═══╝ ██╔══██║██╔═══╝ ██╔══╝  ██╔══██╗██║     ██║     ██║██╔═══╝ [0m
+[36m██║     ██║  ██║██║     ███████╗██║  ██║╚██████╗███████╗██║██║     [0m
+[36m╚═╝     ╚═╝  ╚═╝╚═╝     ╚══════╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝╚═╝     [0m
+[34m  ───────────────────────────────────────────────────────[0m
+[2mMode            [0m [33mexternal-postgres[0m  |  [35mstatic-ui[0m
+[2mDeploy          [0m local_trusted (private)
+[2mBind            [0m loopback [2m(127.0.0.1)[0m
+[2mAuth            [0m [32mready[0m
+[2mServer          [0m 3101 [2m(requested 3100)[0m
+[2mAPI             [0m http://127.0.0.1:3101/api [2m(health: http://127.0.0.1:3101/api/health)[0m
+[2mUI              [0m http://127.0.0.1:3101
+[2mDatabase        [0m postgresql://postgres:***@localhost:5433/paperclip
+[2mMigrations      [0m already applied
+[2mAgent JWT       [0m [32mset[0m
+[2mHeartbeat       [0m enabled [2m(30000ms)[0m
+[2mDB Backup       [0m enabled [2m(every 60m, keep 30d)[0m
+[2mBackup Dir      [0m C:\Users\workf\.paperclip\instances\default\data\backups
+[2mConfig          [0m C:\Users\workf\.paperclip\instances\default\config.json
+[34m  ───────────────────────────────────────────────────────[0m
+
+[10:42:29] [32mINFO[39m: [36mAuthenticated mode auth origin configuration[39m [90m{"authBaseUrlMode":"auto","authPublicBaseUrl":"http://localhost:3100","trustedOrigins":[],"trustedOriginsSource":{"derived":0,"env":0}}[39m
+[10:42:30] [32mINFO[39m: [36mplugin job coordinator started — listening to lifecycle events[39m [90m{"service":"plugin-job-coordinator"}[39m
+[10:42:30] [32mINFO[39m: [36mplugin job scheduler started[39m [90m{"service":"plugin-job-scheduler","tickIntervalMs":30000,"maxConcurrentJobs":10}[39m
+[10:42:30] [32mINFO[39m: [36minitializing plugin tool dispatcher[39m [90m{"service":"plugin-tool-dispatcher"}[39m
+[10:42:30] [32mINFO[39m: [36mplugin-dev-watcher: initialized[39m [90m{"service":"plugin-dev-watcher","resolvesInstalledPlugins":true}[39m
+[10:42:30] [32mINFO[39m: [36mplugin-loader: loading all ready plugins[39m [90m{"service":"plugin-loader"}[39m
+[10:42:30] [33mWARN[39m: [36mRequested port is busy; using next free port (requestedPort=3100, selectedPort=3101)[39m
+[10:42:30] [32mINFO[39m: [36mAutomatic database backups enabled[39m [90m{"intervalMinutes":60,"retentionSource":"instance-settings-db","backupDir":"C:\Users\workf\.paperclip\instances\default\data\backups"}[39m
+[10:42:30] [32mINFO[39m: [36mServer listening on 127.0.0.1:3101[39m
+[10:42:30] [32mINFO[39m: [36mloaded tools from ready plugins[39m [90m{"service":"plugin-tool-dispatcher","readyPlugins":0,"registeredTools":0}[39m
+[10:42:30] [32mINFO[39m: [36mplugin tool dispatcher initialized[39m [90m{"service":"plugin-tool-dispatcher","totalTools":0}[39m
+[10:42:30] [32mINFO[39m: [36mplugin-loader: no ready plugins to load[39m [90m{"service":"plugin-loader"}[39m
+[11:42:30] [32mINFO[39m: [36mAutomatic database backup starting[39m [90m{"backupDir":"C:\Users\workf\.paperclip\instances\default\data\backups","trigger":"scheduled"}[39m
+[11:42:36] [32mINFO[39m: [36mAutomatic database backup complete: C:\Users\workf\.paperclip\instances\default\data\backups\paperclip-20260604-114230.sql.gz (6.9M)[39m [90m{"backupFile":"C:\Users\workf\.paperclip\instances\default\data\backups\paperclip-20260604-114230.sql.gz","sizeBytes":7217286,"prunedCount":0,"backupDir":"C:\Users\workf\.paperclip\instances\default\data\backups","retention":{"dailyDays":7,"weeklyWeeks":4,"monthlyMonths":1},"trigger":"scheduled","durationMs":6254}[39m
