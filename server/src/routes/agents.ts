@@ -284,6 +284,20 @@ function chooseGitHubInstructionsEntryFile(
   return paths[0]!;
 }
 
+async function resolveGitHubTokenForInstructionsImport(
+  secretsSvc: ReturnType<typeof secretService>,
+  companyId: string,
+  adapterConfig: Record<string, unknown>,
+): Promise<GitHubTokenResolution> {
+  try {
+    const { config } = await secretsSvc.resolveAdapterConfigForRuntime(companyId, adapterConfig);
+    return readGitHubTokenFromResolvedAdapterConfig(config);
+  } catch (err) {
+    console.warn("Failed to resolve adapter config for GitHub token lookup; continuing without token:", err instanceof Error ? err.message : String(err));
+    return { token: null, source: "none (secret resolution failed)" };
+  }
+}
+
 function readGitHubTokenFromResolvedAdapterConfig(config: Record<string, unknown>): GitHubTokenResolution {
   const env =
     typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
@@ -2426,9 +2440,7 @@ export function agentRoutes(
       );
     }
     const githubTokenResolutionForInstructionsImport = instructionsGitHubUrlValue
-      ? readGitHubTokenFromResolvedAdapterConfig(
-        (await secretsSvc.resolveAdapterConfigForRuntime(companyId, normalizedAdapterConfig)).config,
-      )
+      ? await resolveGitHubTokenForInstructionsImport(secretsSvc, companyId, normalizedAdapterConfig)
       : { token: null, source: "none (GitHub URL import disabled)" };
     console.log("GitHub token resolution for instructions bundle import:", {
       token: githubTokenResolutionForInstructionsImport.token ? "[redacted]" : null,
@@ -2642,9 +2654,7 @@ export function agentRoutes(
       );
     }
     const githubTokenResolutionForInstructionsImport = instructionsGitHubUrlValue
-      ? readGitHubTokenFromResolvedAdapterConfig(
-        (await secretsSvc.resolveAdapterConfigForRuntime(companyId, normalizedAdapterConfig)).config,
-      )
+      ? await resolveGitHubTokenForInstructionsImport(secretsSvc, companyId, normalizedAdapterConfig)
       : { token: null, source: "none (GitHub URL import disabled)" };
     const importedInstructionsBundle = instructionsGitHubUrlValue
       ? await resolveInstructionsBundleFromGitHubUrl(

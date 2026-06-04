@@ -565,7 +565,10 @@ export function secretService(db: Db) {
         outcome: "failure",
         errorCode,
       }).catch(() => undefined);
-      throw err;
+      if (err instanceof HttpError) {
+        throw err;
+      }
+      throw unprocessable(`Failed to resolve secret: ${err instanceof Error ? err.message : "unknown error"}`);
     }
   }
 
