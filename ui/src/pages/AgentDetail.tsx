@@ -1737,7 +1737,18 @@ function PromptsTab({
   }, [agent.id]);
 
   const getCapabilities = useAdapterCapabilities();
-  const isLocal = getCapabilities(agent.adapterType).supportsInstructionsBundle;
+  const adapterSupportsBundle = getCapabilities(agent.adapterType).supportsInstructionsBundle;
+  const adapterConfig = agent.adapterConfig;
+  const hasBundleConfig = Boolean(
+    adapterConfig &&
+    typeof adapterConfig === "object" &&
+    !Array.isArray(adapterConfig) &&
+    ("instructionsBundleMode" in adapterConfig ||
+      "instructionsRootPath" in adapterConfig ||
+      "instructionsEntryFile" in adapterConfig ||
+      "instructionsFilePath" in adapterConfig),
+  );
+  const isLocal = adapterSupportsBundle || hasBundleConfig;
 
   const { data: bundle, isLoading: bundleLoading } = useQuery({
     queryKey: queryKeys.agents.instructionsBundle(agent.id),
