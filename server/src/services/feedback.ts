@@ -106,7 +106,6 @@ type ResolvedFeedbackTarget = FeedbackTargetRecord & {
 };
 
 const feedbackExportColumns = getTableColumns(feedbackExports);
-const instructionsSvc = agentInstructionsService();
 
 type FeedbackTraceShareClient = {
   uploadTraceBundle(bundle: FeedbackTraceBundle): Promise<{ objectKey: string }>;
@@ -1072,7 +1071,7 @@ async function buildIssueContext(
 }
 
 async function buildAgentContext(
-  db: Pick<Db, "select">,
+  db: Db,
   companyId: string,
   authorAgentId: string | null,
   createdByRunId: string | null,
@@ -1209,6 +1208,8 @@ async function buildAgentContext(
       }
       : null,
   };
+
+  const instructionsSvc = agentInstructionsService(db);
 
   const instructionsBundle = await instructionsSvc.getBundle({
     id: agent.id,
@@ -1413,7 +1414,7 @@ async function buildPayloadArtifacts(
   const exportId = buildExportId(input.voteId, input.now);
   const [issueContext, agentContext] = await Promise.all([
     buildIssueContext(db, input.issue, input.target, state),
-    buildAgentContext(db, input.issue.companyId, input.target.authorAgentId, input.target.createdByRunId, state),
+    buildAgentContext(db as Db, input.issue.companyId, input.target.authorAgentId, input.target.createdByRunId, state),
   ]);
 
   const payloadSnapshot = {

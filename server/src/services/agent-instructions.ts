@@ -1,7 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { Db } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { resolveHomeAwarePath, resolvePaperclipInstanceRoot } from "../home-paths.js";
+import { logger } from "../middleware/logger.js";
+import { instructionFilesRepo } from "./agent-instruction-files-repo.js";
 
 const ENTRY_FILE_DEFAULT = "AGENTS.md";
 const MODE_KEY = "instructionsBundleMode";
@@ -273,60 +276,106 @@ function deriveBundleState(agent: AgentLike): BundleState {
   };
 }
 
-async function recoverManagedBundleState(agent: AgentLike, state: BundleState): Promise<BundleState> {
+async function migrateManagedFromFilesystem(agent: AgentLike, db: Db): Promise<boolean> {
   const managedRootPath = resolveManagedInstructionsRoot(agent);
-  const stat = await statIfExists(managedRootPath);
-  if (!stat?.isDirectory()) return state;
+  const dirStat = await statIfExists(managedRootPath);
+  if (!dirStat?.isDirectory()) return false;
 
   const files = await listFilesRecursive(managedRootPath);
-  if (files.length === 0) return state;
+  if (files.length === 0) return false;
 
-  const recoveredEntryFile = files.includes(state.entryFile)
-    ? state.entryFile
-    : files.includes(ENTRY_FILE_DEFAULT)
-      ? ENTRY_FILE_DEFAULT
-      : files[0]!;
+  let migratedCount = 0;
+  for (const filePath of files) {
+    try {
+      const absolutePath = resolvePathWithinRoot(managedRootPath, filePath);
+      const content = await fs.readFile(absolutePath, "utf8");
+      const repo = instructionFilesRepo(db);
+      await repo.upsert(agent.id, filePath, content);
+      migratedCount++;
+    } catch (err) {
+      logger.warn({ agentId: agent.id, filePath, err }, "Failed to migrate instruction file from filesystem to database");
+    }
+  }
 
-  if (!state.rootPath) {
+  if (migratedCount > 0) {
+    logger.info({ agentId: agent.id, count: migratedCount }, "Agent instructions migration complete: filesystem to database");
+  }
+  return migratedCount > 0;
+}
+
+async function recoverManagedBundleState(agent: AgentLike, state: BundleState, db: Db): Promise<BundleState> {
+  const managedRootPath = resolveManagedInstructionsRoot(agent);
+  const repo = instructionFilesRepo(db);
+
+  const fileCount = await repo.countByAgent(agent.id).catch((err) => {
+    logger.error({ agentId: agent.id, err }, "Database read error: failed to count instruction files");
+    return 0;
+  });
+
+  if (fileCount > 0) {
+    const filePaths = await repo.filePathsByAgent(agent.id);
+    if (filePaths.length === 0) return state;
+
+    const recoveredEntryFile = filePaths.includes(state.entryFile)
+      ? state.entryFile
+      : filePaths.includes(ENTRY_FILE_DEFAULT)
+        ? ENTRY_FILE_DEFAULT
+        : filePaths[0]!;
+
+    if (!state.rootPath) {
+      return {
+        ...state,
+        mode: "managed",
+        rootPath: managedRootPath,
+        entryFile: recoveredEntryFile,
+        resolvedEntryPath: path.resolve(managedRootPath, recoveredEntryFile),
+      };
+    }
+
+    if (state.mode === "external") return state;
+
+    const resolvedConfiguredRoot = path.resolve(state.rootPath);
+    const configuredRootMatchesManaged = resolvedConfiguredRoot === managedRootPath;
+    const hasEntryMismatch = recoveredEntryFile !== state.entryFile;
+
+    if (configuredRootMatchesManaged && !hasEntryMismatch) {
+      return state;
+    }
+
+    const warnings = [...state.warnings];
+    if (!configuredRootMatchesManaged) {
+      warnings.push(
+        `Recovered managed instructions from database at ${managedRootPath}; ignoring stale configured root ${state.rootPath}.`,
+      );
+    }
+    if (hasEntryMismatch) {
+      warnings.push(
+        `Recovered managed instructions entry file from database as ${recoveredEntryFile}; previous entry ${state.entryFile} was missing.`,
+      );
+    }
+
     return {
       ...state,
       mode: "managed",
       rootPath: managedRootPath,
       entryFile: recoveredEntryFile,
       resolvedEntryPath: path.resolve(managedRootPath, recoveredEntryFile),
+      warnings,
     };
   }
 
-  if (state.mode === "external") return state;
+  // No DB records - try filesystem fallback for migration
+  const stat = await statIfExists(managedRootPath);
+  if (!stat?.isDirectory()) return state;
 
-  const resolvedConfiguredRoot = path.resolve(state.rootPath);
-  const configuredRootMatchesManaged = resolvedConfiguredRoot === managedRootPath;
-  const hasEntryMismatch = recoveredEntryFile !== state.entryFile;
+  const files = await listFilesRecursive(managedRootPath);
+  if (files.length === 0) return state;
 
-  if (configuredRootMatchesManaged && !hasEntryMismatch) {
-    return state;
-  }
+  const migrated = await migrateManagedFromFilesystem(agent, db);
+  if (!migrated) return state;
 
-  const warnings = [...state.warnings];
-  if (!configuredRootMatchesManaged) {
-    warnings.push(
-      `Recovered managed instructions from disk at ${managedRootPath}; ignoring stale configured root ${state.rootPath}.`,
-    );
-  }
-  if (hasEntryMismatch) {
-    warnings.push(
-      `Recovered managed instructions entry file from disk as ${recoveredEntryFile}; previous entry ${state.entryFile} was missing.`,
-    );
-  }
-
-  return {
-    ...state,
-    mode: "managed",
-    rootPath: managedRootPath,
-    entryFile: recoveredEntryFile,
-    resolvedEntryPath: path.resolve(managedRootPath, recoveredEntryFile),
-    warnings,
-  };
+  logger.info({ agentId: agent.id }, "Agent instructions restored from filesystem to database");
+  return recoverManagedBundleState(agent, state, db);
 }
 
 function toBundle(agent: AgentLike, state: BundleState, files: AgentInstructionsFileSummary[]): AgentInstructionsBundle {
@@ -451,21 +500,36 @@ export function syncInstructionsBundleConfigFromFilePath(
   return applyBundleConfig(next, { mode, rootPath, entryFile });
 }
 
-export function agentInstructionsService() {
+export function agentInstructionsService(db: Db) {
+  const repo = instructionFilesRepo(db);
+
   async function getBundle(agent: AgentLike): Promise<AgentInstructionsBundle> {
-    const state = await recoverManagedBundleState(agent, deriveBundleState(agent));
+    const state = await recoverManagedBundleState(agent, deriveBundleState(agent), db);
     if (!state.rootPath) return toBundle(agent, state, []);
+
+    if (state.mode === "managed") {
+      const rows = await repo.findByAgent(agent.id).catch((err) => {
+        logger.error({ agentId: agent.id, err }, "Database read error: failed to read instruction files for bundle");
+        return [];
+      });
+      if (rows.length === 0) return toBundle(agent, state, []);
+      const summaries: AgentInstructionsFileSummary[] = rows.map((row) => ({
+        path: row.filePath,
+        size: row.content.length,
+        language: inferLanguage(row.filePath),
+        markdown: isMarkdown(row.filePath),
+        isEntryFile: row.filePath === state.entryFile,
+        editable: true,
+        deprecated: false,
+        virtual: false,
+      }));
+      logger.info({ agentId: agent.id, fileCount: rows.length }, "Loaded instruction files from database");
+      return toBundle(agent, state, summaries);
+    }
+
+    // External mode: use filesystem
     const stat = await statIfExists(state.rootPath);
     if (!stat?.isDirectory()) {
-      if (state.mode === "managed") {
-        try {
-          await fs.mkdir(state.rootPath, { recursive: true });
-        } catch { /* best effort */ }
-        const retryStat = await statIfExists(state.rootPath);
-        if (retryStat?.isDirectory()) {
-          return toBundle(agent, state, []);
-        }
-      }
       return toBundle(agent, {
         ...state,
         warnings: [...state.warnings, `Instructions root does not exist: ${state.rootPath}`],
@@ -477,7 +541,7 @@ export function agentInstructionsService() {
   }
 
   async function readFile(agent: AgentLike, relativePath: string): Promise<AgentInstructionsFileDetail> {
-    const state = await recoverManagedBundleState(agent, deriveBundleState(agent));
+    const state = await recoverManagedBundleState(agent, deriveBundleState(agent), db);
     if (relativePath === LEGACY_PROMPT_TEMPLATE_PATH) {
       const content = asString(state.config[PROMPT_KEY]);
       if (content === null) throw notFound("Instructions file not found");
@@ -494,13 +558,36 @@ export function agentInstructionsService() {
       };
     }
     if (!state.rootPath) throw notFound("Agent instructions bundle is not configured");
+
+    const normalizedPath = normalizeRelativeFilePath(relativePath);
+
+    if (state.mode === "managed") {
+      const row = await repo.findOne(agent.id, normalizedPath).catch((err) => {
+        logger.error({ agentId: agent.id, filePath: normalizedPath, err }, "Database read error: failed to read instruction file");
+        return null;
+      });
+      if (!row) throw notFound("Instructions file not found");
+      logger.info({ agentId: agent.id, filePath: normalizedPath }, "Loaded instruction file from database");
+      return {
+        path: normalizedPath,
+        size: row.content.length,
+        language: inferLanguage(normalizedPath),
+        markdown: isMarkdown(normalizedPath),
+        isEntryFile: normalizedPath === state.entryFile,
+        editable: true,
+        deprecated: false,
+        virtual: false,
+        content: row.content,
+      };
+    }
+
+    // External mode: use filesystem
     const absolutePath = resolvePathWithinRoot(state.rootPath, relativePath);
     const [content, stat] = await Promise.all([
       fs.readFile(absolutePath, "utf8").catch(() => null),
       fs.stat(absolutePath).catch(() => null),
     ]);
     if (content === null || !stat?.isFile()) throw notFound("Instructions file not found");
-    const normalizedPath = normalizeRelativeFilePath(relativePath);
     return {
       path: normalizedPath,
       size: stat.size,
@@ -519,7 +606,7 @@ export function agentInstructionsService() {
     options?: { clearLegacyPromptTemplate?: boolean },
   ): Promise<{ adapterConfig: Record<string, unknown>; state: BundleState }> {
     const derived = deriveBundleState(agent);
-    const current = await recoverManagedBundleState(agent, derived);
+    const current = await recoverManagedBundleState(agent, derived, db);
     if (current.rootPath && current.mode) {
       const adapterConfig = buildPersistedBundleConfig(derived, current, options);
       return {
@@ -536,15 +623,17 @@ export function agentInstructionsService() {
       entryFile,
       clearLegacyPromptTemplate: options?.clearLegacyPromptTemplate,
     });
-    await fs.mkdir(managedRoot, { recursive: true });
 
-    const entryPath = resolvePathWithinRoot(managedRoot, entryFile);
-    const entryStat = await statIfExists(entryPath);
-    if (!entryStat?.isFile()) {
-      const legacyInstructions = await readLegacyInstructions(agent, current.config);
-      if (legacyInstructions.trim().length > 0) {
-        await fs.mkdir(path.dirname(entryPath), { recursive: true });
-        await fs.writeFile(entryPath, legacyInstructions, "utf8");
+    const hasDb = await repo.countByAgent(agent.id).catch(() => 0);
+    if (hasDb === 0) {
+      const entryRecord = await repo.findOne(agent.id, entryFile).catch(() => null);
+      if (!entryRecord) {
+        const legacyInstructions = await readLegacyInstructions(agent, current.config);
+        if (legacyInstructions.trim().length > 0) {
+          await repo.upsert(agent.id, entryFile, legacyInstructions).catch((err) => {
+            logger.error({ agentId: agent.id, filePath: entryFile, err }, "Database write failure: failed to create entry instruction file");
+          });
+        }
       }
     }
 
@@ -563,7 +652,7 @@ export function agentInstructionsService() {
       clearLegacyPromptTemplate?: boolean;
     },
   ): Promise<{ bundle: AgentInstructionsBundle; adapterConfig: Record<string, unknown> }> {
-    const state = await recoverManagedBundleState(agent, deriveBundleState(agent));
+    const state = await recoverManagedBundleState(agent, deriveBundleState(agent), db);
     const nextMode = input.mode ?? state.mode ?? "managed";
     const nextEntryFile = input.entryFile ? normalizeRelativeFilePath(input.entryFile) : state.entryFile;
     let nextRootPath: string;
@@ -582,17 +671,34 @@ export function agentInstructionsService() {
       nextRootPath = resolvedRoot;
     }
 
-    await fs.mkdir(nextRootPath, { recursive: true });
-
-    const existingFiles = await listFilesRecursive(nextRootPath);
-    const exported = await exportFiles(agent);
-    if (existingFiles.length === 0) {
-      await writeBundleFiles(nextRootPath, exported.files);
-    }
-    const refreshedFiles = existingFiles.length === 0 ? await listFilesRecursive(nextRootPath) : existingFiles;
-    if (!refreshedFiles.includes(nextEntryFile)) {
-      const nextEntryContent = exported.files[nextEntryFile] ?? exported.files[exported.entryFile] ?? "";
-      await writeBundleFiles(nextRootPath, { [nextEntryFile]: nextEntryContent });
+    if (nextMode === "managed") {
+      const hasDb = await repo.countByAgent(agent.id).catch(() => 0);
+      if (hasDb === 0) {
+        const exported = await exportFiles(agent);
+        for (const [filePath, content] of Object.entries(exported.files)) {
+          await repo.upsert(agent.id, filePath, content).catch((err) => {
+            logger.error({ agentId: agent.id, filePath, err }, "Database write failure: failed to write instruction file during bundle update");
+          });
+        }
+      }
+      const dbFiles = await repo.filePathsByAgent(agent.id);
+      if (!dbFiles.includes(nextEntryFile)) {
+        const exportedResult = await exportFiles(agent);
+        const content = exportedResult.files[nextEntryFile] ?? exportedResult.files[exportedResult.entryFile] ?? "";
+        await repo.upsert(agent.id, nextEntryFile, content);
+      }
+    } else {
+      await fs.mkdir(nextRootPath, { recursive: true });
+      const existingFiles = await listFilesRecursive(nextRootPath);
+      const exported = await exportFiles(agent);
+      if (existingFiles.length === 0) {
+        await writeBundleFiles(nextRootPath, exported.files);
+      }
+      const refreshedFiles = existingFiles.length === 0 ? await listFilesRecursive(nextRootPath) : existingFiles;
+      if (!refreshedFiles.includes(nextEntryFile)) {
+        const nextEntryContent = exported.files[nextEntryFile] ?? exported.files[exported.entryFile] ?? "";
+        await writeBundleFiles(nextRootPath, { [nextEntryFile]: nextEntryContent });
+      }
     }
 
     const nextConfig = applyBundleConfig(state.config, {
@@ -630,9 +736,20 @@ export function agentInstructionsService() {
     }
 
     const prepared = await ensureWritableBundle(agent, options);
-    const absolutePath = resolvePathWithinRoot(prepared.state.rootPath!, relativePath);
-    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    await fs.writeFile(absolutePath, content, "utf8");
+    const normalizedPath = normalizeRelativeFilePath(relativePath);
+
+    if (prepared.state.mode === "managed") {
+      await repo.upsert(agent.id, normalizedPath, content).catch((err) => {
+        logger.error({ agentId: agent.id, filePath: normalizedPath, err }, "Database write failure: failed to write instruction file");
+        throw err;
+      });
+      logger.info({ agentId: agent.id, filePath: normalizedPath }, "Wrote instruction file to database");
+    } else {
+      const absolutePath = resolvePathWithinRoot(prepared.state.rootPath!, relativePath);
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+      await fs.writeFile(absolutePath, content, "utf8");
+    }
+
     const nextAgent = { ...agent, adapterConfig: prepared.adapterConfig };
     const [bundle, file] = await Promise.all([
       getBundle(nextAgent),
@@ -646,7 +763,7 @@ export function agentInstructionsService() {
     adapterConfig: Record<string, unknown>;
   }> {
     const derived = deriveBundleState(agent);
-    const state = await recoverManagedBundleState(agent, derived);
+    const state = await recoverManagedBundleState(agent, derived, db);
     if (relativePath === LEGACY_PROMPT_TEMPLATE_PATH) {
       throw unprocessable("Cannot delete the legacy promptTemplate pseudo-file");
     }
@@ -655,8 +772,15 @@ export function agentInstructionsService() {
     if (normalizedPath === state.entryFile) {
       throw unprocessable("Cannot delete the bundle entry file");
     }
-    const absolutePath = resolvePathWithinRoot(state.rootPath, normalizedPath);
-    await fs.rm(absolutePath, { force: true });
+
+    if (state.mode === "managed") {
+      await repo.deleteOne(agent.id, normalizedPath);
+      logger.info({ agentId: agent.id, filePath: normalizedPath }, "Deleted instruction file from database");
+    } else {
+      const absolutePath = resolvePathWithinRoot(state.rootPath, normalizedPath);
+      await fs.rm(absolutePath, { force: true });
+    }
+
     const adapterConfig = buildPersistedBundleConfig(derived, state);
     const bundle = await getBundle({ ...agent, adapterConfig });
     return { bundle, adapterConfig };
@@ -667,18 +791,30 @@ export function agentInstructionsService() {
     entryFile: string;
     warnings: string[];
   }> {
-    const state = await recoverManagedBundleState(agent, deriveBundleState(agent));
+    const state = await recoverManagedBundleState(agent, deriveBundleState(agent), db);
     if (state.rootPath) {
-      const stat = await statIfExists(state.rootPath);
-      if (stat?.isDirectory()) {
-        const relativePaths = await listFilesRecursive(state.rootPath);
-        const files = Object.fromEntries(await Promise.all(relativePaths.map(async (relativePath) => {
-          const absolutePath = resolvePathWithinRoot(state.rootPath!, relativePath);
-          const content = await fs.readFile(absolutePath, "utf8");
-          return [relativePath, content] as const;
-        })));
-        if (Object.keys(files).length > 0) {
+      if (state.mode === "managed") {
+        const rows = await repo.findByAgent(agent.id).catch((err) => {
+          logger.error({ agentId: agent.id, err }, "Database read error: failed to read instruction files for export");
+          return [];
+        });
+        if (rows.length > 0) {
+          const files = Object.fromEntries(rows.map((row) => [row.filePath, row.content]));
+          logger.info({ agentId: agent.id, fileCount: rows.length }, "Exported instruction files from database");
           return { files, entryFile: state.entryFile, warnings: state.warnings };
+        }
+      } else {
+        const stat = await statIfExists(state.rootPath);
+        if (stat?.isDirectory()) {
+          const relativePaths = await listFilesRecursive(state.rootPath);
+          const files = Object.fromEntries(await Promise.all(relativePaths.map(async (relativePath) => {
+            const absolutePath = resolvePathWithinRoot(state.rootPath!, relativePath);
+            const content = await fs.readFile(absolutePath, "utf8");
+            return [relativePath, content] as const;
+          })));
+          if (Object.keys(files).length > 0) {
+            return { files, entryFile: state.entryFile, warnings: state.warnings };
+          }
         }
       }
     }
@@ -704,21 +840,26 @@ export function agentInstructionsService() {
     const entryFile = options?.entryFile ? normalizeRelativeFilePath(options.entryFile) : ENTRY_FILE_DEFAULT;
 
     if (options?.replaceExisting) {
-      await fs.rm(rootPath, { recursive: true, force: true });
+      await repo.deleteAllForAgent(agent.id).catch((err) => {
+        logger.error({ agentId: agent.id, err }, "Database write failure: failed to clear existing instruction files");
+      });
     }
-    await fs.mkdir(rootPath, { recursive: true });
 
     const normalizedEntries = Object.entries(files).map(([relativePath, content]) => [
       normalizeRelativeFilePath(relativePath),
       content,
     ] as const);
+
     for (const [relativePath, content] of normalizedEntries) {
-      const absolutePath = resolvePathWithinRoot(rootPath, relativePath);
-      await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-      await fs.writeFile(absolutePath, content, "utf8");
+      await repo.upsert(agent.id, relativePath, content).catch((err) => {
+        logger.error({ agentId: agent.id, filePath: relativePath, err }, "Database write failure: failed to write instruction file");
+      });
     }
+
     if (!normalizedEntries.some(([relativePath]) => relativePath === entryFile)) {
-      await fs.writeFile(resolvePathWithinRoot(rootPath, entryFile), "", "utf8");
+      await repo.upsert(agent.id, entryFile, "").catch((err) => {
+        logger.error({ agentId: agent.id, filePath: entryFile, err }, "Database write failure: failed to write entry instruction file");
+      });
     }
 
     const adapterConfig = applyBundleConfig(asRecord(agent.adapterConfig), {
@@ -728,6 +869,18 @@ export function agentInstructionsService() {
       clearLegacyPromptTemplate: options?.clearLegacyPromptTemplate,
     });
     const bundle = await getBundle({ ...agent, adapterConfig });
+    await fs.mkdir(rootPath, { recursive: true }).catch(() => {});
+    for (const [relativePath, content] of normalizedEntries) {
+      const absolutePath = resolvePathWithinRoot(rootPath, relativePath);
+      await fs.mkdir(path.dirname(absolutePath), { recursive: true }).catch(() => {});
+      await fs.writeFile(absolutePath, content, "utf8").catch(() => {});
+    }
+    if (!normalizedEntries.some(([relativePath]) => relativePath === entryFile)) {
+      const entryAbsPath = resolvePathWithinRoot(rootPath, entryFile);
+      await fs.mkdir(path.dirname(entryAbsPath), { recursive: true }).catch(() => {});
+      await fs.writeFile(entryAbsPath, "", "utf8").catch(() => {});
+    }
+
     return { bundle, adapterConfig };
   }
 
